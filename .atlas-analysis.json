@@ -1,0 +1,126 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Yoyo Lang",
+  "projectDescription": "An embeddable, JIT-compiled, memory-safe scripting language for C++20 with two backends: LLVM and a custom virtual machine (YVM).",
+  "theme": "aspen",
+  "primaryColor": "#6C63FF",
+  "lightColor": "#EAE8FF",
+  "darkColor": "#2A2560",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Language Guide",
+            "pages": [
+              "language/syntax",
+              "language/types",
+              "language/functions",
+              "language/structs-and-classes",
+              "language/enums-and-unions",
+              "language/generics",
+              "language/interfaces",
+              "language/memory-model",
+              "language/borrow-checker",
+              "language/macros"
+            ]
+          },
+          {
+            "group": "Embedding Guide",
+            "pages": [
+              "embedding/overview",
+              "embedding/engine-setup",
+              "embedding/app-modules",
+              "embedding/calling-functions",
+              "embedding/fibers-and-async"
+            ]
+          },
+          {
+            "group": "Backends",
+            "pages": [
+              "backends/overview",
+              "backends/yvm",
+              "backends/llvm"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/engine",
+              "api/module",
+              "api/app-module",
+              "api/runtime",
+              "api/fiber",
+              "api/type",
+              "api/parser",
+              "api/scanner"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Example Programs",
+            "pages": [
+              "examples/linked-list",
+              "examples/tic-tac-toe",
+              "examples/operator-overloading",
+              "examples/iterators"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "JIT compilation via LLVM backend",
+    "Custom bytecode virtual machine (YVM) backend",
+    "Memory safety via borrow checker with domain analysis",
+    "Statically typed with generics and type inference",
+    "Embeddable in C++20 applications via AppModule API",
+    "Fiber/coroutine-based concurrency model",
+    "Operator overloading",
+    "Interface/trait system",
+    "GC references alongside borrow-checked references",
+    "String interpolation with `${}` syntax"
+  ],
+  "publicApiSurface": [
+    "Yoyo::Engine",
+    "Yoyo::YVMEngine",
+    "Yoyo::LLVMEngine",
+    "Yoyo::YVMAppModule",
+    "Yoyo::LLVMAppModule",
+    "Yoyo::ModuleBase",
+    "Yoyo::Runtime",
+    "Yoyo::Fiber",
+    "Yoyo::Type",
+    "Yoyo::Parser",
+    "Yoyo::Scanner",
+    "Yoyo::Result",
+    "YVMAppModule::addFunction()",
+    "YVMAppModule::addEnum()",
+    "YVMAppModule::addClass()",
+    "YVMEngine::addAppModule()",
+    "YVMEngine::addModule()",
+    "YVMEngine::compile()",
+    "YVMEngine::createFiber()",
+    "Engine::execute()",
+    "Engine::viewString()"
+  ]
+}
