@@ -1,0 +1,201 @@
+---
+title: "Installation"
+description: "Prerequisites, build options, and linking instructions for Yoyo."
+---
+
+Yoyo is distributed as source and built with [Meson](https://mesonbuild.com). There are no pre-built binaries.
+
+## Prerequisites
+
+All builds require:
+
+| Dependency | Version | Notes |
+|---|---|---|
+| C++ compiler | C++20 | GCC 10+, Clang 13+, or MSVC 19.29+ |
+| [Meson](https://mesonbuild.com) | 1.0+ | Build system |
+| [Ninja](https://ninja-build.org) | Any | Backend for Meson |
+| [Boehm GC](https://www.hboehm.info/gc/) (`bdw-gc`) | Any | Required garbage collector |
+
+Backend-specific dependencies:
+
+| Backend | Additional dependency |
+|---|---|
+| YVM (default) | `libffi` — bundled wrap available in `subprojects/libffi.wrap` |
+| LLVM | LLVM library (any version supported by the project) |
+
+The `yoyo-vm` subproject is bundled under `subprojects/yoyo-vm` and is pulled in automatically when building the YVM backend.
+
+## Getting the source
+
+```bash
+git clone https://github.com/git-i/yoyo-lang.git
+cd yoyo-lang
+```
+
+## Build commands
+
+<Tabs>
+  <Tab title="YVM backend (default)">
+    The YVM backend uses the bundled `yoyo-vm` subproject and `libffi`. This is the simplest build configuration and requires no LLVM installation.
+
+    <CodeGroup>
+
+    ```bash Configure
+    meson setup build -Dexecutor=yvm
+    ```
+
+    ```bash Build
+    ninja -C build
+    ```
+
+    </CodeGroup>
+
+    Meson will automatically download `libffi` via the wrap file in `subprojects/libffi.wrap` if it is not found on your system.
+
+  </Tab>
+  <Tab title="LLVM backend">
+    The LLVM backend requires LLVM to be installed and discoverable by `pkg-config` or CMake.
+
+    <CodeGroup>
+
+    ```bash Configure
+    meson setup build -Dexecutor=llvm
+    ```
+
+    ```bash Configure (static LLVM)
+    meson setup build -Dexecutor=llvm -Dllvm_static=true
+    ```
+
+    ```bash Build
+    ninja -C build
+    ```
+
+    </CodeGroup>
+
+    By default (`llvm_static=true`), Yoyo links LLVM statically. Set `-Dllvm_static=false` to link dynamically.
+
+  </Tab>
+  <Tab title="Both backends">
+    Build both backends into a single `libyoyo`. This requires both `libffi` and LLVM.
+
+    <CodeGroup>
+
+    ```bash Configure
+    meson setup build -Dexecutor=both
+    ```
+
+    ```bash Build
+    ninja -C build
+    ```
+
+    </CodeGroup>
+
+    When both backends are compiled in, you choose which engine to instantiate at runtime by using `YVMEngine` or `LLVMEngine`.
+  </Tab>
+</Tabs>
+
+## Meson options
+
+All options can be passed to `meson setup` with the `-D` prefix (e.g. `-Dexecutor=llvm`).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `executor` | combo | `yvm` | Which execution backend(s) to compile. One of `yvm`, `llvm`, or `both`. |
+| `llvm_static` | boolean | `true` | Link LLVM statically. Only relevant when `executor` is `llvm` or `both`. |
+| `default_library` | combo | `static` | Whether to build `libyoyo` as a `static` or `shared` library. |
+
+<Note>
+  When building a shared library (`-Ddefault_library=shared`), Yoyo defines `YOYO_DLL` and `YOYO_SHARED` internally, and consumers must define `YOYO_SHARED`. This is handled automatically when using the `yoyo_dep` Meson dependency.
+</Note>
+
+## Linking against libyoyo
+
+### Using Meson (recommended)
+
+If your project uses Meson, place the Yoyo source tree (or a `.wrap` file pointing to it) in your `subprojects/` directory, then declare the dependency:
+
+```meson
+yoyo_proj = subproject('yoyo-lang')
+yoyo_dep  = yoyo_proj.get_variable('yoyo_dep')
+
+executable('my_app', 'main.cpp', dependencies: [yoyo_dep])
+```
+
+The `yoyo_dep` variable sets up the correct include paths, compile flags, and library links automatically.
+
+### Manual linking
+
+If you are not using Meson, link against the built library and add the include directory manually:
+
+<CodeGroup>
+
+```bash GCC / Clang
+g++ -std=c++20 -Ipath/to/yoyo-lang/include/yoyo \
+    main.cpp -Lpath/to/build -lyoyo \
+    $(pkg-config --libs bdw-gc) \
+    $(pkg-config --libs libffi) \
+    -o my_app
+```
+
+```cmake CMake
+target_include_directories(my_app PRIVATE path/to/yoyo-lang/include/yoyo)
+target_link_directories(my_app PRIVATE path/to/build)
+target_link_libraries(my_app PRIVATE yoyo)
+```
+
+</CodeGroup>
+
+<Warning>
+  Always compile with `-std=c++20` (or `/std:c++20` on MSVC). Yoyo headers use C++20 features including concepts, `std::span`, and designated initializers.
+</Warning>
+
+## Include path layout
+
+The public headers live under `include/yoyo/`. Backend-specific headers are in subdirectories:
+
+```
+include/yoyo/
+├── engine.h          # Base Engine class
+├── runtime.h         # Runtime, Fiber
+├── module.h          # ModuleBase
+├── common.h          # YOYO_API macro and common types
+├── yvm/
+│   ├── yvm_engine.h  # YVMEngine
+│   └── app_module.h  # YVMAppModule
+└── llvm/
+    ├── llvm_engine.h # LLVMEngine
+    └── app_module.h  # LLVMAppModule
+```
+
+A minimal embed using the YVM backend needs these includes:
+
+```cpp
+#include <engine.h>        // Yoyo::Engine::viewString()
+#include <yvm/yvm_engine.h>  // Yoyo::YVMEngine
+#include <yvm/app_module.h>  // Yoyo::YVMAppModule
+```
+
+## Verifying the build
+
+Meson registers an `irgen` test that exercises both backends. Run it after building:
+
+```bash
+meson test -C build
+```
+
+Or run the test binary directly from the `tests/` directory (it expects to find `source.yoyo` in the working directory):
+
+```bash
+./build/ir_gen_test
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Embed Yoyo in a C++ project and run your first script.
+  </Card>
+  <Card title="Embedding guide" icon="plug" href="/embedding/overview">
+    Full guide to engine setup, app modules, and calling Yoyo functions from C++.
+  </Card>
+</CardGroup>

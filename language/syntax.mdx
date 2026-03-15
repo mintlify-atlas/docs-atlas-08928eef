@@ -1,0 +1,308 @@
+---
+title: "Syntax Overview"
+description: "Learn the foundational syntax rules of Yoyo: unified declarations, expressions, string interpolation, and control flow."
+---
+
+Yoyo's syntax is heavily inspired by [cppfront/cpp2](https://github.com/hsutter/cppfront) with deliberate derivations. The most important rule is that **all declarations follow a single unified form**.
+
+## The Unified Declaration Syntax
+
+Every declaration in Yoyo uses the same shape:
+
+```yoyo
+name: kind = value;
+```
+
+| Part | Role |
+|------|------|
+| `name` | The identifier being declared |
+| `kind` | The type or category (can be omitted for variables when it can be inferred) |
+| `value` | The initializer or body |
+
+This one rule covers variables, functions, structs, enums, interfaces, and more. There is no separate `let`, `var`, `def`, or `class` keyword — the `kind` tells the compiler what you are declaring.
+
+<CodeGroup>
+
+```yoyo Variable
+// Immutable variable with explicit type
+x: i32 = 42;
+
+// Immutable variable with inferred type
+y := 3.14;
+
+// Mutable variable
+count: mut i32 = 0;
+
+// Mutable variable, type inferred
+name: mut = "Alice";
+```
+
+```yoyo Function
+// Function declaration
+add: fn (a: i32, b: i32) -> i32 = return a + b;
+
+// Entry point
+main: fn = {
+    result := add(1, 2);
+}
+```
+
+```yoyo Struct
+// Struct declaration
+Vector2: struct = {
+    x: u32,
+    y: u32
+}
+```
+
+</CodeGroup>
+
+## Variables
+
+### Immutable vs Mutable
+
+By default variables are **immutable**. Use `mut` to opt into mutability.
+
+```yoyo
+// Immutable — cannot be reassigned
+max_retries: i32 = 5;
+
+// Mutable — can be reassigned
+count: mut i32 = 0;
+count = count + 1;
+```
+
+The `mut` keyword appears between the colon and the type:
+
+```yoyo
+variable: mut TypeName = initializer;
+```
+
+### Type Inference
+
+When the type can be unambiguously inferred from the initializer, the kind annotation can be replaced with `:=`:
+
+```yoyo
+// Equivalent to: game: mut Game = Game::new();
+game: mut = Game::new();
+
+// Equivalent to: intermediate: str = "───┼───┼───";
+intermediate := "───┼───┼───";
+```
+
+From `tic_tac_toe.yoyo`:
+
+```yoyo
+intermediate := "───┼───┼───";
+row1 := " ${player_text(&this.data, 0)} │ ${player_text(&this.data, 1)} │ ${player_text(&this.data, 2)} ";
+```
+
+### Constants
+
+Top-level compile-time constants use the `const` keyword as the kind:
+
+```yoyo
+MAX_SIZE: const i32 = 100;
+```
+
+## Expressions
+
+Expressions in Yoyo follow the same precedence rules as C++. The standard arithmetic, comparison, logical, and bitwise operators all behave as expected.
+
+### Arithmetic
+
+```yoyo
+sum := a + b;
+diff := a - b;
+prod := a * b;
+quot := a / b;
+rem := a % b;
+```
+
+### Comparison
+
+```yoyo
+if (a == b) { /* ... */ }
+if (a != b) { /* ... */ }
+if (a < b || a >= c) { /* ... */ }
+```
+
+### Logical
+
+```yoyo
+if (cond1 && cond2) { /* ... */ }
+if (cond1 || cond2) { /* ... */ }
+if (!cond) { /* ... */ }
+```
+
+### Cast expression
+
+Use `as` to cast between numeric types:
+
+```yoyo
+wide: i64 = narrow as i64;
+```
+
+### Address-of and dereference
+
+`&expr` takes a reference, `*expr` dereferences one:
+
+```yoyo
+player_text: fn (p: &[Player; 9], alt: i32) -> str = {
+    if (*(*p)[alt] == Player::X) return "X";
+    // ...
+}
+```
+
+### Scope resolution
+
+The `::` operator accesses members of a type or module's namespace:
+
+```yoyo
+Player::X
+LinkedList::<str>::new()
+core::Iterator::<&T>::next()
+```
+
+## String Interpolation
+
+Strings support inline expressions with `${}`:
+
+```yoyo
+name := "World";
+greeting := "Hello, ${name}!";
+```
+
+Expressions of any complexity can appear inside `${}`:
+
+```yoyo
+// From tic_tac_toe.yoyo
+row1 := " ${player_text(&this.data, 0)} │ ${player_text(&this.data, 1)} │ ${player_text(&this.data, 2)} ";
+
+// From linked_list.yoyo
+app::func(&"${lol.0}: ${*lol.1}");
+```
+
+## Comments
+
+```yoyo
+// Single-line comment
+
+/*
+   Multi-line
+   block comment
+*/
+```
+
+## Blocks
+
+A block is a sequence of statements wrapped in `{}`:
+
+```yoyo
+main: fn = {
+    a: mut = LinkedList::<str>::new();
+    a.append("Hello");
+    a.append("World");
+}
+```
+
+Function bodies are implicit blocks **when they contain only a single statement**. The braces can be omitted:
+
+```yoyo
+// Single-statement body — no braces needed
+add: fn (a: i32, b: i32) -> i32 = return a + b;
+
+// Multi-statement body — braces required
+greet: fn (name: str) = {
+    msg := "Hello, ${name}!";
+    msg.test::print();
+}
+```
+
+## Control Flow
+
+### if / else
+
+```yoyo
+if (condition) {
+    // then branch
+} else if (other) {
+    // else-if branch
+} else {
+    // else branch
+}
+```
+
+From `tic_tac_toe.yoyo`:
+
+```yoyo
+cycle: fn (p: Player) -> Player = {
+    if (p == Player::X)
+        return Player::O;
+    else if (p == Player::O)
+        return Player::X;
+    return p;
+}
+```
+
+### while
+
+```yoyo
+while (condition) {
+    // body
+}
+```
+
+```yoyo
+// From tic_tac_toe.yoyo
+while (true) {
+    game.play();
+    game.render();
+    if |winner| (game.check_winner()) {
+        if (winner != Player::None) {
+            "${winner} won".test::print();
+            break;
+        }
+    }
+}
+```
+
+`break` and `continue` work as in C++.
+
+### for
+
+Iterate over any value that implements `core::Iterator`:
+
+```yoyo
+for (item in collection) {
+    // body
+}
+```
+
+```yoyo
+// From linked_list.yoyo
+for (lol in a.iter().chain(b.iter()).enumerate()) {
+    app::func(&"${lol.0}: ${*lol.1}");
+}
+```
+
+## Module Declarations
+
+Modules are declared at the top of a file:
+
+```yoyo
+app: module = APP
+```
+
+Importing another module:
+
+```yoyo
+// Bring a single entity into scope
+using Module::Type;
+
+// Bring all top-level entities
+using Module::*;
+
+// Bring multiple entities
+using Module::{Type1, Type2};
+```

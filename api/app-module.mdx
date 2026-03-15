@@ -1,0 +1,209 @@
+---
+title: "AppModule"
+description: "Native binding modules that expose C++ functions, enums, and classes to Yoyo scripts. Available as YVMAppModule and LLVMAppModule."
+keywords: ["AppModule", "YVMAppModule", "LLVMAppModule", "addFunction", "addEnum", "addClass", "bindings"]
+---
+
+An *AppModule* is a module that exists entirely on the C++ side. Instead of containing Yoyo source code, it registers native C++ symbols — functions, enums, and classes — that Yoyo scripts can call as if they were ordinary Yoyo declarations.
+
+Two concrete implementations are available, one per backend:
+
+- **`YVMAppModule`** — used with `YVMEngine`
+- **`LLVMAppModule`** — used with `LLVMEngine`
+
+Both classes expose an identical public API; only the underlying code-generation differs.
+
+<Tip>
+Create an AppModule by calling `engine.addAppModule("name")` rather than constructing it directly. The engine registers the module and returns a pointer you can use immediately.
+</Tip>
+
+## `Result` enum
+
+Every registration method returns a `Result` value indicating success or the reason for failure.
+
+```cpp
+enum class Result {
+    Success,
+    NullParameter,
+    InvalidSignature,
+    ParameterCountMismatch,
+    ReturnTypeMismatch,
+    ParameterTypeMismatch,
+    DuplicateEnumValue,
+};
+```
+
+<ResponseField name="Success" type="Result">
+  Registration completed without errors.
+</ResponseField>
+
+<ResponseField name="NullParameter" type="Result">
+  A required pointer argument (e.g. the function pointer) was `nullptr`.
+</ResponseField>
+
+<ResponseField name="InvalidSignature" type="Result">
+  The signature string could not be parsed as a valid Yoyo function signature.
+</ResponseField>
+
+<ResponseField name="ParameterCountMismatch" type="Result">
+  The number of C++ template parameters does not match the number of parameters in the parsed signature (after accounting for `sret`).
+</ResponseField>
+
+<ResponseField name="ReturnTypeMismatch" type="Result">
+  A type that requires struct-return (`sret`) was declared with a non-`void` C++ return type.
+</ResponseField>
+
+<ResponseField name="ParameterTypeMismatch" type="Result">
+  Reserved for future parameter-level type checking.
+</ResponseField>
+
+<ResponseField name="DuplicateEnumValue" type="Result">
+  Two enum variants were assigned the same integer value in `addEnum`.
+</ResponseField>
+
+## Methods
+
+### `addFunction`
+
+```cpp
+template<typename R, typename... Args>
+Result addFunction(
+    std::string sig_str,
+    R(*func)(Args...),
+    std::string name);
+```
+
+Registers a C++ function pointer so that Yoyo scripts can call it by `name`.
+
+<ParamField path="sig_str" type="string" required>
+  A Yoyo function signature string describing parameter types and return type, for example `"(x: i32, y: i32): i32"`. This string is parsed by `Parser::parseFunctionSignature()` at registration time.
+</ParamField>
+
+<ParamField path="func" type="R(*)(Args...)" required>
+  Raw C++ function pointer. Must not be `nullptr`; passing `nullptr` returns `Result::NullParameter`.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  The name under which the function will be visible to Yoyo scripts.
+</ParamField>
+
+**Returns** `Result` — `Success` if registration succeeded, otherwise an error code describing the mismatch.
+
+#### How parameter count is verified
+
+After parsing `sig_str`, the implementation checks:
+
+```
+expected_params = sig.parameters.size() + (sig.returnType.should_sret() ? 1 : 0)
+actual_params   = sizeof...(Args)
+```
+
+For types that require struct-return (large structs, strings, etc.), the JIT ABI passes an extra hidden output pointer as the first argument. In that case the C++ function must accept that extra pointer and must return `void`. Failing either condition yields `ParameterCountMismatch` or `ReturnTypeMismatch` respectively.
+
+### `addEnum`
+
+```cpp
+Result addEnum(
+    std::string enum_name,
+    std::unordered_map<std::string, int32_t> values);
+```
+
+Registers a C++ enum so that Yoyo scripts can reference it by `enum_name`.
+
+<ParamField path="enum_name" type="string" required>
+  The name Yoyo scripts will use to refer to this enum.
+</ParamField>
+
+<ParamField path="values" type="unordered_map<string, int32_t>" required>
+  Map of variant name to integer value. Returns `Result::DuplicateEnumValue` if any two entries share the same integer.
+</ParamField>
+
+### `addClass`
+
+```cpp
+Result addClass(
+    std::string class_name,
+    std::vector<ClassVariable> variables,
+    Ownership sh,
+    std::string block_hash);
+```
+
+Registers a C++ struct/class layout so that Yoyo scripts can create and manipulate instances.
+
+<ParamField path="class_name" type="string" required>
+  The name Yoyo scripts will use to refer to this class.
+</ParamField>
+
+<ParamField path="variables" type="vector<ClassVariable>" required>
+  The ordered list of fields in the class, with their names and Yoyo types.
+</ParamField>
+
+<ParamField path="sh" type="Ownership" required>
+  Ownership semantics (`Ownership::Unique`, `Ownership::Shared`, etc.) that control how the runtime manages instance lifetimes.
+</ParamField>
+
+<ParamField path="block_hash" type="string" required>
+  The block hash of the scope in which this class should be registered. Typically the module's `module_hash`.
+</ParamField>
+
+## Full example
+
+```cpp
+#include <yoyo/yvm/yvm_engine.h>
+#include <yoyo/yvm/app_module.h>
+#include <cstdio>
+
+// --- Native functions to expose ---
+
+void nativePrint(void* str) {
+    auto sv = Yoyo::Engine::viewString(str);
+    std::printf("%.*s\n", (int)sv.size(), sv.data());
+}
+
+int32_t nativeAdd(int32_t a, int32_t b) {
+    return a + b;
+}
+
+int main() {
+    Yoyo::YVMEngine engine;
+
+    // 1. Create an AppModule and register functions
+    auto* app = engine.addAppModule("native");
+
+    auto r1 = app->addFunction("(s: str): void", nativePrint, "print");
+    assert(r1 == Yoyo::Result::Success);
+
+    auto r2 = app->addFunction("(a: i32, b: i32): i32", nativeAdd, "add");
+    assert(r2 == Yoyo::Result::Success);
+
+    // 2. Register a C++ enum
+    auto r3 = app->addEnum("Color", {
+        {"Red",   0},
+        {"Green", 1},
+        {"Blue",  2},
+    });
+    assert(r3 == Yoyo::Result::Success);
+
+    // 3. Register a C++ class layout
+    // (ClassVariable construction depends on your Yoyo version)
+    // auto r4 = app->addClass("Point", variables, Ownership::Unique,
+    //                         app->module_hash);
+
+    // 4. Write Yoyo code that uses the native bindings
+    engine.addModule("main", R"(
+        import native;
+        pub fn run() {
+            native::print("hello from yoyo");
+            let x = native::add(3, 4);
+        }
+    )");
+
+    engine.compile();
+    engine.prepareForExecution();
+    engine.execute();
+}
+```
+
+<Note>
+The `addFunction` template deduces `R` and `Args...` from the function pointer. The Yoyo signature string is parsed at call time, so an invalid string is caught at registration rather than at script execution.
+</Note>

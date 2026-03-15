@@ -1,97 +1,131 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Yoyo Lang"
+description: "An embeddable, JIT-compiled, memory-safe scripting language for C++20"
 ---
 
-## Setting up
-
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Embed Yoyo into your C++ application in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Language Guide" icon="book" href="/language/syntax">
+    Learn the Yoyo language syntax and type system
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Embedding Guide" icon="plug" href="/embedding/overview">
+    Integrate Yoyo into your C++ codebase with the AppModule API
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/engine">
+    Full C++ API reference for the Yoyo engine
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What is Yoyo?
 
-Everything you need to create world-class documentation.
+Yoyo is a statically typed, embeddable scripting language written in C++20. It is designed to be compiled and run directly inside your C++ application, giving you a safe, expressive scripting layer without the overhead or unsafety of traditional FFI approaches.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+<Note>
+  Yoyo is an active research language. The implementation is still evolving and not yet production-ready.
+</Note>
 
-## Need inspiration?
+## Key features
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="JIT Compilation" icon="bolt">
+    Compile Yoyo source to native code via the LLVM backend or run on the custom YVM bytecode VM
+  </Card>
+  <Card title="Memory Safety" icon="shield">
+    Borrow checker with domain analysis ensures memory safety without a garbage collector (GC references also available)
+  </Card>
+  <Card title="Static Typing" icon="check">
+    Fully statically typed with generics, type inference, and interfaces
+  </Card>
+  <Card title="C++ Interop" icon="link">
+    Expose C++ functions, enums, and classes to Yoyo scripts via the AppModule API
+  </Card>
+  <Card title="Coroutines" icon="arrows-spin">
+    Fiber-based concurrency model for async execution within the engine runtime
+  </Card>
+  <Card title="Operator Overloading" icon="calculator">
+    Define custom operators for your types using familiar syntax
+  </Card>
+</CardGroup>
+
+## Declaration syntax
+
+All declarations in Yoyo follow a unified syntax inspired by [cppfront](https://github.com/hsutter/cppfront):
+
+```yoyo
+name: kind = value;
+```
+
+This applies to variables, functions, types, and constants:
+
+```yoyo
+// Variable
+x: i32 = 42;
+name: str = "hello";
+
+// Type-inferred variable
+y: mut = 10;
+
+// Function
+add: fn (a: i32, b: i32) -> i32 = return a + b;
+
+// Struct
+Point: struct = {
+    x: f32,
+    y: f32
+}
+```
+
+## Two backends
+
+<Tabs>
+  <Tab title="YVM (default)">
+    The **Yoyo Virtual Machine** is a custom bytecode interpreter that JIT-compiles via libffi. It is the recommended backend for embedding, offering fast startup and a simpler build configuration.
+
+    ```cpp
+    #include <yvm/yvm_engine.h>
+    #include <yvm/app_module.h>
+
+    Yoyo::YVMEngine engine;
+    auto mod = engine.addAppModule("app");
+    mod->addFunction("(x: &str) -> void", my_print, "print");
+    engine.addModule("main", source_code);
+    engine.compile();
+    engine.execute();
+    ```
+  </Tab>
+  <Tab title="LLVM">
+    The **LLVM backend** compiles Yoyo directly to native machine code using LLVM IR, providing maximum runtime performance for compute-intensive scripts.
+
+    ```cpp
+    #include <llvm/llvm_engine.h>
+    #include <llvm/app_module.h>
+
+    Yoyo::LLVMEngine engine;
+    auto mod = engine.addAppModule("app");
+    engine.addModule("main", source_code);
+    engine.compile();
+    engine.execute();
+    ```
+  </Tab>
+</Tabs>
+
+## Get started
+
+<Steps>
+  <Step title="Install dependencies">
+    Build Yoyo from source using Meson. You need a C++20 compiler, the Boehm GC library, and either LLVM or libffi depending on your chosen backend.
+  </Step>
+  <Step title="Add Yoyo to your project">
+    Use Meson's `subproject` or link against the built `libyoyo` library and include `include/yoyo/` in your include path.
+  </Step>
+  <Step title="Create an engine and expose your API">
+    Instantiate `YVMEngine` or `LLVMEngine`, add an `AppModule`, and register any C++ functions your scripts will call.
+  </Step>
+  <Step title="Load and execute scripts">
+    Call `addModule()` with your Yoyo source, then `compile()` and `execute()`.
+  </Step>
+</Steps>
+
+Ready to dive in? Start with the [quickstart guide](/quickstart).

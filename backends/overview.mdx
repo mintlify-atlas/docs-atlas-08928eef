@@ -1,0 +1,99 @@
+---
+title: "Backend overview"
+description: "How Yoyo's two execution backends fit into the compiler pipeline and when to use each."
+---
+
+Yoyo supports two interchangeable execution backends: **YVM** and **LLVM**. The frontend — scanning, parsing, type checking, and borrow checking — is shared between both. Only the IR generation and execution stages differ.
+
+## Architecture
+
+```
+ Source code
+     │
+     ▼
+ ┌─────────────────────────────────┐
+ │        Shared frontend          │
+ │  Scanner → Parser → Type        │
+ │  Checker → Borrow Checker       │
+ └──────────────┬──────────────────┘
+                │
+       ┌────────┴────────┐
+       ▼                 ▼
+  YVMIRGenerator   LLVMIRGenerator
+  (bytecode)       (LLVM IR)
+       │                 │
+       ▼                 ▼
+  Yvm::VM           LLVM ORC JIT
+  (interpreter)     (native code)
+```
+
+Both `YVMIRGenerator` and `LLVMIRGenerator` extend the shared `IRGenerator` base class defined in `ir_gen.h`. The backend-specific subclass walks the same AST and emits either YVM bytecode (via `Yvm::Emitter`) or LLVM IR (via `llvm::IRBuilder`).
+
+## Comparison
+
+| Feature | YVM | LLVM |
+|---|---|---|
+| **Startup time** | Fast — bytecode emission is lightweight | Slower — full LLVM IR lowering and JIT compilation |
+| **Runtime performance** | Interpreted bytecode; suitable for scripting workloads | Native machine code; highest throughput |
+| **Dependencies** | `yoyo-vm` subproject, `libffi` | LLVM (see version requirements) |
+| **`compile()` return type** | `bool` — reports success or failure | `void` — errors via LLVM diagnostics |
+| **Static library support** | No | Yes (`addStaticLibrary()`) |
+| **Platform-specific native module** | Yes (Windows and Unix variants) | No |
+| **Best for** | Embedding, tooling, rapid iteration | Compute-intensive scripts, production JIT |
+
+## Choosing a backend
+
+**Choose YVM when:**
+- You are embedding Yoyo in a game engine, application, or tool and want a minimal dependency footprint.
+- Fast cold-start matters more than peak arithmetic throughput.
+- You want `compile()` to return a `bool` so you can surface errors to users easily.
+- You are on a system where LLVM is not installed or would be difficult to link.
+
+**Choose LLVM when:**
+- Scripts perform heavy numeric computation and you need maximum throughput.
+- You already depend on LLVM in your project.
+- You want to link against static libraries from script code.
+- You are building a tool (for example, an AOT compiler) that can tolerate slower startup.
+
+<Tip>
+  The default Meson option is `executor=yvm`. If you are unsure which backend to use, start with YVM.
+</Tip>
+
+## Selecting a backend at build time
+
+Yoyo uses [Meson](https://mesonbuild.com/) as its build system. The `executor` option controls which backend is compiled in.
+
+<Tabs>
+  <Tab title="YVM only">
+    ```bash
+    meson setup build -Dexecutor=yvm
+    ```
+  </Tab>
+  <Tab title="LLVM only">
+    ```bash
+    meson setup build -Dexecutor=llvm
+    ```
+  </Tab>
+  <Tab title="Both backends">
+    ```bash
+    meson setup build -Dexecutor=both
+    ```
+  </Tab>
+</Tabs>
+
+The `both` value compiles both backends into the same library. This is useful for testing or for applications that want to choose a backend at runtime based on a configuration flag.
+
+<Note>
+  When `executor=llvm` or `executor=both`, Meson will look for LLVM using `dependency('llvm')`. You can also control static vs. dynamic linking with `-Dllvm_static=true|false` (default: `true`).
+</Note>
+
+## Backend pages
+
+<CardGroup cols={2}>
+  <Card title="YVM backend" icon="microchip" href="/backends/yvm">
+    Custom bytecode virtual machine with libffi for native calls. The recommended default for embedding.
+  </Card>
+  <Card title="LLVM backend" icon="bolt" href="/backends/llvm">
+    Emits LLVM IR and JIT-compiles to native machine code for maximum runtime performance.
+  </Card>
+</CardGroup>

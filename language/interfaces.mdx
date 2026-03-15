@@ -1,0 +1,169 @@
+---
+title: "Interfaces"
+description: "Define and implement interfaces in Yoyo. Covers interface declarations, implementing interfaces on structs, and explicit interface method dispatch."
+---
+
+Interfaces define a contract — a set of methods that any conforming type must provide. They are Yoyo's mechanism for ad-hoc polymorphism and generic constraints.
+
+## Declaring an Interface
+
+An interface is declared with `interface` as the kind:
+
+```yoyo
+InterfaceName: interface = {
+    method_name: fn (params) -> ReturnType;
+    // ...
+}
+```
+
+Interface methods that have no body serve as abstract requirements. Methods with bodies provide a default implementation.
+
+### Generic Interface
+
+Interfaces can be parameterised:
+
+```yoyo
+// The core iterator interface
+core::Iterator::<T>   // T is the element type yielded by `next`
+```
+
+The `GenericInterfaceDeclaration` extends `InterfaceDeclaration` with a `GenericClause`.
+
+## Implementing an Interface
+
+Declare that a struct implements an interface by including `impl InterfaceName` in the struct header, and then write the implementation block inside the struct body:
+
+```yoyo
+TypeName: struct:&::<TypeParams> impl InterfaceName = {
+    // fields...
+    impl InterfaceName
+    {
+        method: fn (&mut this) -> ReturnType = {
+            // implementation
+        }
+    }
+}
+```
+
+### Example: Implementing `core::Iterator`
+
+From `linked_list.yoyo`:
+
+```yoyo
+LinkedListIterator: struct:&::<T> impl core::Iterator::<&T> = {
+    curr: (^Node::<T>)?,
+    impl core::Iterator::<&T>
+    {
+        next: fn (&mut this) -> (&T)? = {
+            if |node| (this.curr) {
+                this.curr = node.next;
+                return &node.data;
+            }
+            else return null;
+        }
+    }
+}
+```
+
+The `struct:&` prefix marks this as a non-owning reference type (see [Structs and Classes](/language/structs-and-classes)).
+
+### Implementing a Generic Interface with Multiple Type Parameters
+
+```yoyo
+EnumerateIter: struct:&::<T, O> impl core::Iterator::<(u64, O)> = {
+    actual_iter: T,
+    idx: u64,
+    impl core::Iterator::<(u64, O)> {
+        next: fn (&mut this) -> (u64, O)? = {
+            if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+                this.idx = this.idx + 1;
+                return (this.idx, nxt);
+            }
+            else return null;
+        }
+    }
+}
+```
+
+## Calling Interface Methods
+
+When a method name is unambiguous you can call it directly:
+
+```yoyo
+this.actual_iter.next()
+```
+
+When a type implements multiple interfaces with the same method name, or when you want to be explicit about which interface's method to use, qualify the call with `Interface::method`:
+
+```yoyo
+this.actual_iter.core::Iterator::<O>::next()
+```
+
+This syntax is used in `linked_list.yoyo` precisely because `actual_iter` is a generic type `T` that implements `core::Iterator::<O>`, and the compiler needs to resolve the call unambiguously:
+
+```yoyo
+next: fn (&mut this) -> (u64, O)? = {
+    if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+        this.idx = this.idx + 1;
+        return (this.idx, nxt);
+    }
+    else return null;
+}
+```
+
+## Using Interfaces as Constraints
+
+Interfaces can constrain generic type parameters. See [Generics](/language/generics) for full coverage. The syntax is:
+
+```yoyo
+fn::<T: impl core::Iterator::<O>, O>
+```
+
+## `impl` Blocks Outside the Struct
+
+The compiler also supports standalone `impl` blocks that attach an interface implementation to a type from outside the struct declaration (via `ImplBlock` in `statement.h`):
+
+```yoyo
+impl::<GenericParams> for SomeType {
+    // interface implementation methods
+}
+```
+
+This allows implementing interfaces for types you don't own.
+
+## Interface Method Requirements
+
+An `InterfaceDeclaration` stores:
+- A list of `FunctionDeclaration` method signatures (required methods)
+- A list of `ImplBlock` entries (`impl_fors`) for default implementations
+
+Methods without a body must be provided by the implementing type. Methods with a body are optional to override.
+
+## ChainIter: Two Iterators in One
+
+A complete real-world example combining generics, multiple interface implementations, and explicit dispatch:
+
+```yoyo
+ChainIter: struct:&::<A, B, O> impl core::Iterator::<O> = {
+    first_iter: A,
+    second_iter: B,
+    impl core::Iterator::<O> {
+        next: fn (&mut this) -> O? = {
+            if |nxt| (this.first_iter.core::Iterator::<O>::next()) return nxt;
+            else return this.second_iter.core::Iterator::<O>::next();
+        }
+    }
+}
+
+chain: fn::<A: impl core::Iterator::<O>, B: impl core::Iterator::<O>, O>
+    (first: A, snd: B) -> ChainIter::<A, B, O>
+    = return ChainIter::<A, B, O>{.first_iter = first, .second_iter = snd};
+```
+
+Usage:
+
+```yoyo
+for (lol in a.iter().chain(b.iter()).enumerate()) {
+    app::func(&"${lol.0}: ${*lol.1}");
+}
+```

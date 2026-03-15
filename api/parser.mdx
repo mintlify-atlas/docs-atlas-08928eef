@@ -1,0 +1,215 @@
+---
+title: "Parser"
+description: "Recursive-descent parser that converts Yoyo source text into an AST. Also used to parse function signature strings in AppModule::addFunction."
+keywords: ["Parser", "parseProgram", "parseFunctionSignature", "parseType", "parseExpression", "AST"]
+---
+
+`Yoyo::Parser` transforms Yoyo source text into an abstract syntax tree (AST). It uses a Pratt parser strategy for expressions, with a `Scanner` for tokenisation.
+
+For most embedding use cases you do not call `Parser` directly — `YVMEngine::addModule` and `LLVMEngine::addModule` handle parsing internally. The exception is `AppModule::addFunction`, which constructs a `Parser` to parse the function signature string you supply.
+
+## Class definition
+
+```cpp
+namespace Yoyo {
+    class Parser {
+    public:
+        explicit Parser(std::string& source);
+
+        std::vector<std::unique_ptr<Statement>> parseProgram();
+        std::unique_ptr<Statement> parseStatement();
+        std::unique_ptr<Expression> parseExpression(uint32_t precedence);
+        std::optional<Type> parseType(uint32_t precedence);
+        std::optional<FunctionSignature> parseFunctionSignature();
+        std::unique_ptr<Statement> parseDeclaration();
+        std::optional<GenericClause> parseGenericClause();
+        std::vector<Attribute> parseAttributeList();
+
+        [[nodiscard]] bool failed() const;
+        void error(std::string message, std::optional<Token> tk);
+        void pushToken(Token t, SourceLocation loc);
+
+        std::optional<Token> Peek();
+        std::optional<Token> Get();
+        std::optional<std::pair<Token, SourceLocation>> PeekWithEndLocation();
+        std::optional<std::pair<Token, SourceLocation>> GetWithEndLocation();
+
+        const Scanner& getScanner() const;
+        const std::string& getSource() const;
+        ASTNode* parent = nullptr;
+    };
+}
+```
+
+## Constructor
+
+```cpp
+explicit Parser(std::string& source);
+```
+
+<ParamField path="source" type="std::string&" required>
+  A reference to the source string to parse. The `Parser` holds a reference (not a copy) for the lifetime of the object; do not destroy `source` while the parser is in use.
+</ParamField>
+
+## Parse methods
+
+### `parseProgram()`
+
+```cpp
+std::vector<std::unique_ptr<Statement>> parseProgram();
+```
+
+Parses a complete Yoyo source file and returns all top-level statements as an owned AST node list. This is the entry point used by the engine when loading a module via `addModule`.
+
+Check `failed()` after calling `parseProgram()` to detect syntax errors.
+
+### `parseStatement()`
+
+```cpp
+std::unique_ptr<Statement> parseStatement();
+```
+
+Parses a single statement (variable declaration, function call, control-flow construct, etc.) and returns it. Returns `nullptr` on failure.
+
+### `parseExpression(precedence)`
+
+```cpp
+std::unique_ptr<Expression> parseExpression(uint32_t precedence);
+```
+
+Parses an expression using Pratt parsing. Pass `0` to parse a full expression at the lowest precedence level. Higher precedence values restrict which operators are consumed.
+
+<ParamField path="precedence" type="uint32_t" required>
+  Minimum operator precedence to include. Pass `0` to parse the complete expression.
+</ParamField>
+
+### `parseType(precedence)`
+
+```cpp
+std::optional<Type> parseType(uint32_t precedence);
+```
+
+Parses a type expression (e.g. `i32`, `List<str>`, `&mut Point`) and returns it as a `Type`. Returns `std::nullopt` if the next tokens do not form a valid type.
+
+### `parseFunctionSignature()`
+
+```cpp
+std::optional<FunctionSignature> parseFunctionSignature();
+```
+
+Parses a Yoyo function signature of the form `(param: Type, ...): ReturnType` and returns the structured `FunctionSignature`. Returns `std::nullopt` if parsing fails.
+
+This is the method called internally by `AppModule::addFunction` to validate and decode the `sig_str` argument:
+
+```cpp
+// Inside AppModule::addFunction
+Parser p(sig_str);
+auto sig_opt = p.parseFunctionSignature();
+if (p.failed()) return Result::InvalidSignature;
+```
+
+### `parseDeclaration()`
+
+```cpp
+std::unique_ptr<Statement> parseDeclaration();
+```
+
+Parses a top-level declaration (function, class, enum, etc.) and returns it as a `Statement`.
+
+### `parseGenericClause()`
+
+```cpp
+std::optional<GenericClause> parseGenericClause();
+```
+
+Parses a generic type parameter list, e.g. `<T, U: SomeInterface>`. Returns `std::nullopt` when no generic clause is present.
+
+### `parseAttributeList()`
+
+```cpp
+std::vector<Attribute> parseAttributeList();
+```
+
+Parses zero or more `#(attr)` attribute annotations that precede a declaration and returns them as a vector.
+
+## Error handling
+
+### `failed()`
+
+```cpp
+[[nodiscard]] bool failed() const;
+```
+
+Returns `true` if any parse error has occurred. Once the parser enters an error state it continues to parse in a best-effort manner (for diagnostics), but the resulting AST may be incomplete.
+
+### `error(message, token)`
+
+```cpp
+void error(std::string message, std::optional<Token> tk);
+```
+
+Records a parse error with a human-readable message and the offending token (or `std::nullopt` if no specific token is available). Sets the internal error flag checked by `failed()`.
+
+## Token lookahead
+
+### `Peek()`
+
+```cpp
+std::optional<Token> Peek();
+```
+
+Returns the next token without consuming it. Returns `std::nullopt` at end-of-file. Consecutive calls to `Peek()` return the same token until `Get()` is called.
+
+### `Get()`
+
+```cpp
+std::optional<Token> Get();
+```
+
+Consumes and returns the next token. Returns `std::nullopt` at end-of-file.
+
+### `PeekWithEndLocation()` / `GetWithEndLocation()`
+
+```cpp
+std::optional<std::pair<Token, SourceLocation>> PeekWithEndLocation();
+std::optional<std::pair<Token, SourceLocation>> GetWithEndLocation();
+```
+
+Variants of `Peek` and `Get` that also return the `SourceLocation` of the token's end position. Useful for tracking precise source ranges in AST nodes.
+
+### `pushToken(token, loc)`
+
+```cpp
+void pushToken(Token t, SourceLocation loc);
+```
+
+Injects a token into the lookahead buffer as if it had been read from the source. The injected token will be returned by the next call to `Peek()` or `Get()`. Used by macro expansion and other syntactic transformations.
+
+## Inspecting the parser state
+
+```cpp
+const Scanner& getScanner() const;
+const std::string& getSource() const;
+```
+
+`getScanner()` provides read access to the underlying `Scanner` for inspecting the current position. `getSource()` returns the source string reference passed to the constructor.
+
+## Use case: parsing signature strings
+
+The most common direct use of `Parser` in embedding code is to validate or parse Yoyo type/signature strings:
+
+```cpp
+#include <yoyo/parser.h>
+
+std::string sig = "(a: i32, b: f64): bool";
+Yoyo::Parser p(sig);
+auto fn_sig = p.parseFunctionSignature();
+
+if (p.failed() || !fn_sig) {
+    std::cerr << "Invalid signature\n";
+} else {
+    std::cout << "Return type: "
+              << fn_sig->returnType.pretty_name("") << '\n';
+    std::cout << "Parameters: " << fn_sig->parameters.size() << '\n';
+}
+```

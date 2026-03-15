@@ -1,0 +1,207 @@
+---
+title: "Generics"
+description: "Write reusable generic functions, structs, and interfaces in Yoyo with type parameters and interface constraints."
+---
+
+Generics allow you to write code that works over many types without sacrificing type safety. Yoyo generics use a `::< >` syntax for type parameters and support interface constraints.
+
+## Generic Functions
+
+Add a generic clause directly after `fn`:
+
+```yoyo
+name: fn::<T> (param: T) -> ReturnType = body;
+```
+
+From `linked_list.yoyo`:
+
+```yoyo
+iter: fn::<T> (list: &LinkedList::<T>) -> LinkedListIterator::<T>
+    = return LinkedListIterator::<T> { .curr = list.first };
+```
+
+## Generic Structs
+
+Add a generic clause after `struct`:
+
+```yoyo
+Name: struct::<T> = {
+    field: T,
+    // ...
+}
+```
+
+From `linked_list.yoyo`:
+
+```yoyo
+Node: struct::<T> = {
+    data: T,
+    next: (^Node::<T>)?
+}
+
+LinkedList: struct::<T> = {
+    first: (^Node::<T>)?,
+    new: fn -> This = return This{ .first = null };
+    append: fn (&mut this, value: T) = {
+        if |val| (this.first) {
+            last: mut = val;
+            // ...
+            last.next = gcnew Node::<T>{ .data = value, .next = null };
+        } else {
+            this.first = gcnew Node::<T>{ .data = value, .next = null };
+        }
+    }
+}
+```
+
+### Multiple Type Parameters
+
+Separate type parameters with commas:
+
+```yoyo
+EnumerateIter: struct:&::<T, O> impl core::Iterator::<(u64, O)> = {
+    actual_iter: T,
+    idx: u64,
+    impl core::Iterator::<(u64, O)> {
+        next: fn (&mut this) -> (u64, O)? = {
+            if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+                this.idx = this.idx + 1;
+                return (this.idx, nxt);
+            }
+            else return null;
+        }
+    }
+}
+```
+
+```yoyo
+ChainIter: struct:&::<A, B, O> impl core::Iterator::<O> = {
+    first_iter: A,
+    second_iter: B,
+    impl core::Iterator::<O> {
+        next: fn (&mut this) -> O? = {
+            if |nxt| (this.first_iter.core::Iterator::<O>::next()) return nxt;
+            else return this.second_iter.core::Iterator::<O>::next();
+        }
+    }
+}
+```
+
+## Instantiating Generics
+
+Provide type arguments with `::< >`:
+
+```yoyo
+// Instantiate a generic struct
+a: mut = LinkedList::<str>::new();
+b: mut = LinkedList::<i32>::new();
+
+// Instantiate a generic function
+iter: fn::<T> (list: &LinkedList::<T>) -> LinkedListIterator::<T>
+
+// Use it
+my_iter := iter::<str>(&a);
+```
+
+In many cases the compiler can infer the type arguments:
+
+```yoyo
+// Type of T inferred from the argument
+a.iter().enumerate()
+```
+
+## Generic Constraints
+
+Constraints restrict which types can be substituted for a type parameter. Use `: impl InterfaceName` to require that a type implement a given interface:
+
+```yoyo
+fn::<T: impl core::Iterator::<O>, O>
+```
+
+Full example from `linked_list.yoyo`:
+
+```yoyo
+enumerate: fn::<T: impl core::Iterator::<O>, O> (iter: T) ->
+    EnumerateIter::<T, O> = return EnumerateIter::<T, O>{.actual_iter = iter, .idx = 0};
+
+chain: fn::<A: impl core::Iterator::<O>, B: impl core::Iterator::<O>, O>
+    (first: A, snd: B) -> ChainIter::<A, B, O> = return ChainIter::<A, B, O>{.first_iter = first, .second_iter = snd};
+```
+
+### Constraint Syntax
+
+The compiler represents constraints as either:
+
+- **`ImplConstraint`** — `T: impl Interface` — the type must implement the interface.
+- **`SatisfyConstraint`** — `T: satisfy Scheme` — the type must satisfy a scheme (advanced use).
+
+### Multiple Constraints
+
+A type parameter can have multiple constraints by chaining them (currently via the `constraints` map in `GenericClause`, which maps each type parameter name to a list of constraints).
+
+## Generic Interfaces
+
+Interfaces can also be generic:
+
+```yoyo
+core::Iterator::<T>   // the Iterator interface parameterised by element type
+```
+
+See [Interfaces](/language/interfaces) for how to declare and implement generic interfaces.
+
+## Generic Type Aliases
+
+```yoyo
+Pair: alias::<T, U> = (T, U);
+```
+
+## Real-World Example: Iterator Adapters
+
+The linked list test file provides a clear example of how generics, interfaces, and constraints compose:
+
+```yoyo
+// Generic iterator adapter: enumerate
+EnumerateIter: struct:&::<T, O> impl core::Iterator::<(u64, O)> = {
+    actual_iter: T,
+    idx: u64,
+    impl core::Iterator::<(u64, O)> {
+        next: fn (&mut this) -> (u64, O)? = {
+            if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+                this.idx = this.idx + 1;
+                return (this.idx, nxt);
+            }
+            else return null;
+        }
+    }
+}
+
+// Generic iterator adapter: chain
+ChainIter: struct:&::<A, B, O> impl core::Iterator::<O> = {
+    first_iter: A,
+    second_iter: B,
+    impl core::Iterator::<O> {
+        next: fn (&mut this) -> O? = {
+            if |nxt| (this.first_iter.core::Iterator::<O>::next()) return nxt;
+            else return this.second_iter.core::Iterator::<O>::next();
+        }
+    }
+}
+
+// Constrained generic functions that build adapters
+enumerate: fn::<T: impl core::Iterator::<O>, O> (iter: T) ->
+    EnumerateIter::<T, O> = return EnumerateIter::<T, O>{.actual_iter = iter, .idx = 0};
+
+chain: fn::<A: impl core::Iterator::<O>, B: impl core::Iterator::<O>, O>
+    (first: A, snd: B) -> ChainIter::<A, B, O>
+    = return ChainIter::<A, B, O>{.first_iter = first, .second_iter = snd};
+
+// Usage
+main: fn = {
+    a: mut = LinkedList::<str>::new();
+    b: mut = LinkedList::<str>::new();
+    // ...
+    for (lol in a.iter().chain(b.iter()).enumerate()) {
+        app::func(&"${lol.0}: ${*lol.1}");
+    }
+}
+```

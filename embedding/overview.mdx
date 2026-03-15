@@ -1,0 +1,151 @@
+---
+title: "Embedding overview"
+description: "Architecture and workflow for embedding Yoyo in a C++ application."
+---
+
+Yoyo is designed to be embedded inside a C++ host application. The host creates an engine, registers C++ functions as app modules, loads Yoyo source code, compiles everything, and then drives execution. This page explains how those pieces fit together.
+
+## Core components
+
+<CardGroup cols={2}>
+  <Card title="Engine" icon="gear">
+    The top-level object that owns all modules, the compiler pipeline, and the runtime. Choose `YVMEngine` or `LLVMEngine` depending on your backend.
+  </Card>
+  <Card title="AppModule" icon="plug">
+    A named bridge module that exposes C++ functions, enums, and classes to Yoyo scripts. Scripts call into it using `module_name::function_name(...)`.
+  </Card>
+  <Card title="ModuleBase" icon="cube">
+    The base type for all modules — both source modules loaded from Yoyo code and app modules registered from C++. Holds type tables, function tables, and a back-pointer to the engine.
+  </Card>
+  <Card title="Runtime and Fiber" icon="arrows-spin">
+    The cooperative scheduler that drives execution. A `Fiber` wraps a single coroutine; the `Runtime` runs all live fibers to completion.
+  </Card>
+</CardGroup>
+
+## Embedding workflow
+
+<Steps>
+  <Step title="Create an engine">
+    Instantiate either `YVMEngine` (no extra dependencies) or `LLVMEngine` (requires LLVM). The engine owns everything that follows.
+
+    ```cpp
+    #include <yvm/yvm_engine.h>
+    Yoyo::YVMEngine engine;
+    ```
+  </Step>
+
+  <Step title="Add app modules and register C++ functions">
+    Call `addAppModule()` to create a named module, then register one C++ function per `addFunction()` call. Each call takes a Yoyo signature string, a function pointer, and the name scripts will use.
+
+    ```cpp
+    #include <yvm/app_module.h>
+
+    auto mod = engine.addAppModule("test");
+    mod->addFunction("(x: &str) -> i32", my_print, "print");
+    mod->addFunction("(x: bool, y: &str) -> void", my_assert, "assert");
+    ```
+  </Step>
+
+  <Step title="Add Yoyo source modules">
+    Pass source code strings to `addModule()`. Each module gets a name that other modules can reference.
+
+    ```cpp
+    engine.addModule("main", source_code);
+    ```
+  </Step>
+
+  <Step title="Compile">
+    Run the full pipeline — parsing, type checking, borrow checking, and IR generation — by calling `compile()`. On the YVM backend, `compile()` returns `bool`; check it before proceeding.
+
+    ```cpp
+    if (!engine.compile()) {
+        // handle compile error
+    }
+    ```
+  </Step>
+
+  <Step title="Prepare for execution">
+    Call `prepareForExecution()` to link and finalise the compiled code before any fibers are created.
+
+    ```cpp
+    engine.prepareForExecution();
+    ```
+  </Step>
+
+  <Step title="Create fibers and execute">
+    Look up compiled Yoyo functions, create `Fiber` objects, and call `execute()` to run the scheduler.
+
+    ```cpp
+    auto fn = engine.findFunction(mod, "main::main").value();
+    auto fib = engine.createFiber(fn);
+    engine.execute();
+    ```
+  </Step>
+</Steps>
+
+## YVM vs LLVM backend
+
+<Tabs>
+  <Tab title="YVM (recommended for embedding)">
+    `YVMEngine` compiles Yoyo to custom bytecode and dispatches C++ calls through libffi. It is the default choice for embedding:
+
+    - No LLVM installation required
+    - Simpler build configuration
+    - Fast startup time
+    - Full fiber/async support
+    - `compile()` returns `bool` so you can check for errors
+
+    ```cpp
+    #include <yvm/yvm_engine.h>
+    #include <yvm/app_module.h>
+
+    Yoyo::YVMEngine engine;
+    ```
+  </Tab>
+  <Tab title="LLVM">
+    `LLVMEngine` lowers Yoyo IR to LLVM IR and compiles to native machine code. Use it when scripts are compute-intensive and peak throughput matters more than startup time:
+
+    - Native machine code, highest runtime performance
+    - Requires LLVM as a build-time and runtime dependency
+    - `compile()` returns `void` (errors are not yet surfaced as a return value)
+    - Supports `addStaticLibrary()` in addition to `addDynamicLibrary()`
+
+    ```cpp
+    #include <llvm/llvm_engine.h>
+    #include <llvm/app_module.h>
+
+    Yoyo::LLVMEngine engine;
+    ```
+  </Tab>
+</Tabs>
+
+## Class reference
+
+| Class | Header | Purpose |
+|---|---|---|
+| `Engine` | `engine.h` | Abstract base for all engines. Owns modules, sources, and the `Runtime`. |
+| `YVMEngine` | `yvm/yvm_engine.h` | Concrete engine using the YVM bytecode backend. |
+| `LLVMEngine` | `llvm/llvm_engine.h` | Concrete engine using the LLVM JIT backend. |
+| `YVMAppModule` | `yvm/app_module.h` | App module for the YVM backend. |
+| `LLVMAppModule` | `llvm/app_module.h` | App module for the LLVM backend. |
+| `ModuleBase` | `module.h` | Base class for all modules. Holds type and function tables. |
+| `Runtime` | `runtime.h` | Cooperative coroutine scheduler. |
+| `Fiber` | `runtime.h` | RAII wrapper around a single coroutine. |
+| `FunctionSignature` | `func_sig.h` | Parsed representation of a Yoyo function signature. |
+
+## Explore the embedding guide
+
+<CardGroup cols={2}>
+  <Card title="Engine setup" icon="gear" href="/embedding/engine-setup">
+    Create and configure a YVM or LLVM engine, load source modules, compile, and drive execution.
+  </Card>
+  <Card title="App modules" icon="plug" href="/embedding/app-modules">
+    Register C++ functions, enums, and classes so Yoyo scripts can call into your application.
+  </Card>
+  <Card title="Calling Yoyo functions" icon="arrow-right" href="/embedding/calling-functions">
+    Look up compiled functions, create fibers, pass arguments, and read return values from C++.
+  </Card>
+  <Card title="Fibers and async" icon="arrows-spin" href="/embedding/fibers-and-async">
+    Understand the cooperative scheduler, fiber lifecycle, and how to use `Engine::sleep()`.
+  </Card>
+</CardGroup>

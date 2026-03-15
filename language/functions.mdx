@@ -1,0 +1,231 @@
+---
+title: "Functions"
+description: "Declare functions, methods, closures, and lambdas in Yoyo. Covers the unified declaration syntax, this parameters, and stored functions."
+---
+
+Functions are first-class citizens in Yoyo. They are declared using the unified `name: kind = value` syntax, with `fn` as the kind.
+
+## Basic Function Syntax
+
+```yoyo
+name: fn (param1: Type1, param2: Type2) -> ReturnType = body;
+```
+
+<CodeGroup>
+
+```yoyo Single expression
+// Single-statement body — braces omitted
+add: fn (a: i32, b: i32) -> i32 = return a + b;
+
+cycle: fn (p: Player) -> Player =
+    return if (p == Player::X) Player::O else Player::X;
+```
+
+```yoyo Block body
+// Multi-statement body — braces required
+cycle: fn (p: Player) -> Player = {
+    if (p == Player::X)
+        return Player::O;
+    else if (p == Player::O)
+        return Player::X;
+    return p;
+}
+```
+
+</CodeGroup>
+
+### Void functions
+
+Omit the return type arrow for procedures that return nothing:
+
+```yoyo
+render: fn (&this) = {
+    row1 := " ${player_text(&this.data, 0)} │ … ";
+    row1.test::print();
+}
+```
+
+This is equivalent to `-> void`.
+
+## Parameters
+
+Parameters are declared `name: Type`:
+
+```yoyo
+player_text: fn (p: &[Player; 9], alt: i32) -> str = {
+    if (*(*p)[alt] == Player::X) return "X";
+    else if (*(*p)[alt] == Player::O) return "O";
+    return "${alt}";
+}
+```
+
+### Passing by reference
+
+Prefix the type with `&` for an immutable reference, or `&mut` for a mutable reference:
+
+```yoyo
+// Immutable reference
+print_list: fn (list: &LinkedList::<str>) = { /* ... */ }
+
+// Mutable reference
+append: fn (&mut this, value: T) = { /* ... */ }
+```
+
+## Methods and `this`
+
+Methods are functions declared inside a struct body. The receiver is accessed via the `this` keyword:
+
+```yoyo
+// Immutable receiver — &this
+render: fn (&this) = {
+    // this is read-only
+}
+
+// Mutable receiver — &mut this
+play: fn (&mut this) = {
+    // can mutate fields
+    *this.data[idx] = this.player;
+    this.player = this.player.cycle();
+}
+```
+
+The `this` parameter must be the first parameter. Inside the body, access fields directly via `this.field`.
+
+### `This` type
+
+Inside a struct or class body, `This` refers to the enclosing type and enables self-referential constructors:
+
+```yoyo
+new: fn -> This = return This{ .first = null };
+```
+
+## Constructor Pattern
+
+Yoyo has no special constructor syntax. By convention, a static function named `new` acts as a constructor:
+
+```yoyo
+LinkedList: struct::<T> = {
+    first: (^Node::<T>)?,
+    new: fn -> This = return This{ .first = null };
+    // ...
+}
+
+// Calling the constructor
+a: mut = LinkedList::<str>::new();
+```
+
+From `tic_tac_toe.yoyo`:
+
+```yoyo
+new: fn -> Game = {
+    return Game{
+        .data = [
+            Player::None, Player::None, Player::None,
+            Player::None, Player::None, Player::None,
+            Player::None, Player::None, Player::None
+        ],
+        .player = Player::X
+    };
+}
+```
+
+## Return Statements
+
+Use `return` to exit a function with a value:
+
+```yoyo
+next: fn (&mut this) -> (&T)? = {
+    if |node| (this.curr) {
+        this.curr = node.next;
+        return &node.data;
+    }
+    else return null;
+}
+```
+
+<Tip>
+A function with a single `return` statement can use the single-expression shorthand and omit braces entirely.
+</Tip>
+
+## Generic Functions
+
+Add a generic clause with `::<TypeParams>` after `fn`:
+
+```yoyo
+iter: fn::<T> (list: &LinkedList::<T>) -> LinkedListIterator::<T>
+    = return LinkedListIterator::<T> { .curr = list.first };
+```
+
+With constraints:
+
+```yoyo
+enumerate: fn::<T: impl core::Iterator::<O>, O> (iter: T) ->
+    EnumerateIter::<T, O> = return EnumerateIter::<T, O>{.actual_iter = iter, .idx = 0};
+```
+
+See [Generics](/language/generics) for the full reference.
+
+## Closures and Lambdas
+
+Lambdas use a `||` capture list followed by a parameter list and body:
+
+```yoyo
+// No captures, one parameter
+print_list: stored = ||(list: &List) for (elem in list.iter()) std::println("${*elem}");
+```
+
+The `stored` keyword indicates the lambda is a stored function (can be called later). Captures are listed between the `||`:
+
+```yoyo
+// Capture `loop_should_stop` by mutable reference
+handle_events(||(ev: Event) {
+    if (ev is QuitEvent) {
+        loop_should_stop = true; break;
+    }
+});
+```
+
+### Capture modes
+
+| Syntax | Meaning |
+|--------|--------|
+| `\|\|` | No captures |
+| `\|x\|` | Capture `x` by value (ownership transfer) |
+| `\|&x\|` | Capture `x` by immutable reference |
+| `\|&mut x\|` | Capture `x` by mutable reference |
+
+## Operator Overloading
+
+Operators are overloaded with the `operator` keyword:
+
+```yoyo
+// From source.yoyo
+operator: [](x: &Vector2, y: u32) -> u32 = {
+    if (y == 0) return x.x; else return x.y;
+}
+
+operator: mut [](x: &mut Vector2, y: u32) -> u32 = {
+    return 100;
+}
+```
+
+Overloadable operators include `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<=>`, `<<`, `>>`, and `[]` (subscript). See the [operator overloading notes](https://github.com/YourRepo/yoyo) for the full list.
+
+## Function Types
+
+A stored function has type `fn(ParamTypes) -> ReturnType`. The internal type-system name is `__fn`. Functions that can be stored and passed as values have `can_be_stored()` returning true.
+
+```yoyo
+// A variable holding a function
+callback: fn(i32) -> bool = some_function;
+```
+
+## C Interop
+
+Import a C function by name using `cimport`:
+
+```yoyo
+printf: cimport "printf";
+```
+
+This brings the C function into scope under the given Yoyo name.

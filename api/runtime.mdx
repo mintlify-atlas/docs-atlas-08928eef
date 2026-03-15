@@ -1,0 +1,118 @@
+---
+title: "Runtime"
+description: "The cooperative coroutine scheduler that drives all Yoyo fibers. Owned by Engine and not typically interacted with directly."
+keywords: ["Runtime", "coroutine", "fiber", "scheduler", "run", "add_job"]
+---
+
+`Yoyo::Runtime` is a cooperative, non-preemptive coroutine scheduler built on top of [minicoro](https://github.com/edubart/minicoro) (`mco_coro`). Every Yoyo function call that crosses the host/script boundary runs as a coroutine managed by the `Runtime`.
+
+The `Runtime` is an internal implementation detail of `Engine`; you normally do not interact with it directly. It is exposed in the public API primarily to support the `Fiber` RAII wrapper and for advanced embedding scenarios.
+
+<Note>
+The comment in the source notes that the runtime is "super primitive" and will likely be replaced in a future version. Treat its API surface as unstable.
+</Note>
+
+## Class definition
+
+```cpp
+namespace Yoyo {
+    struct Runtime {
+        std::vector<mco_coro*> routs;
+        std::vector<mco_coro*> dead_coros;
+        std::unordered_map<mco_coro*, bool> is_externally_owned;
+
+        using TimePoint = std::chrono::time_point<std::chrono::steady_clock>;
+        std::vector<std::pair<mco_coro*,
+            std::variant<mco_coro*, TimePoint, std::monostate>>> waiting;
+
+        void run();
+        void add_job(mco_coro*);
+        void release_job(mco_coro*);
+    };
+}
+```
+
+## Members
+
+### `routs`
+
+```cpp
+std::vector<mco_coro*> routs;
+```
+
+The list of currently active coroutines — those that are either running or ready to run. The scheduler iterates over this list on each tick, resuming each coroutine in turn.
+
+### `dead_coros`
+
+```cpp
+std::vector<mco_coro*> dead_coros;
+```
+
+Coroutines that have completed execution but whose memory has not yet been freed. The runtime defers destruction to avoid invalidating iterators during a scheduling tick.
+
+### `is_externally_owned`
+
+```cpp
+std::unordered_map<mco_coro*, bool> is_externally_owned;
+```
+
+Tracks which coroutines have an external owner (i.e. a `Fiber` RAII wrapper on the host side). When the flag is `true` for a given coroutine, the runtime will not free that coroutine's memory when it finishes — the owning `Fiber` destructor is responsible for cleanup via `release_job`.
+
+### `waiting`
+
+```cpp
+using TimePoint = std::chrono::time_point<std::chrono::steady_clock>;
+std::vector<std::pair<mco_coro*,
+    std::variant<mco_coro*, TimePoint, std::monostate>>> waiting;
+```
+
+Coroutines that are suspended and waiting on one of three conditions:
+
+| Variant type | Meaning |
+|---|---|
+| `mco_coro*` | Waiting for another coroutine to finish |
+| `TimePoint` | Sleeping until a specific point in time (`Engine::sleep`) |
+| `std::monostate` | Waiting indefinitely (e.g. parked until woken externally) |
+
+On each scheduler tick, the runtime checks each entry and moves coroutines back to `routs` when their condition is satisfied.
+
+## Methods
+
+### `run()`
+
+```cpp
+void run();
+```
+
+Enters the main scheduler loop. Repeatedly resumes coroutines in `routs`, processes the `waiting` queue, and frees completed coroutines from `dead_coros`. Returns when there are no more active or waiting coroutines.
+
+This is called internally by `Engine::execute()`. Do not call it directly unless you are managing the engine lifecycle manually.
+
+### `add_job(coro)`
+
+```cpp
+void add_job(mco_coro* coro);
+```
+
+Schedules a coroutine for execution by appending it to `routs`. The coroutine will be resumed on the next scheduler tick.
+
+### `release_job(coro)`
+
+```cpp
+void release_job(mco_coro* coro);
+```
+
+Releases and destroys a coroutine. If the coroutine is still running it is first added to `dead_coros` for deferred cleanup; if it has already finished it is destroyed immediately.
+
+This is called automatically by the `Fiber` destructor. You should not call it directly unless you are constructing `Fiber`-equivalent objects manually.
+
+## Relationship with `Fiber`
+
+The typical interaction pattern is:
+
+1. Host code calls `YVMEngine::createFiber(fn)` → returns a `Fiber` that internally calls `add_job`.
+2. Host code calls `Engine::execute()` → calls `Runtime::run()`.
+3. The scheduler resumes the fiber's coroutine until it yields or completes.
+4. When the `Fiber` destructor runs (or `Fiber::forget()` is called) → calls `release_job`.
+
+See the [Fiber](/api/fiber) reference for the RAII wrapper API.

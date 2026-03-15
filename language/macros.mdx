@@ -1,0 +1,114 @@
+---
+title: "Macros"
+description: "Declare and invoke macros in Yoyo. Macros operate on expressions at compile time and are distinct from functions."
+---
+
+<Warning>
+Macros are an experimental feature in Yoyo. The syntax and semantics are not fully stabilised and may change.
+</Warning>
+
+## Overview
+
+Macros are compile-time transformations that operate on expressions. Unlike functions, which are called at runtime with typed values, macros receive expressions as arguments and can produce new expressions. They enable syntactic abstractions that cannot be expressed as regular functions.
+
+## Declaration Syntax
+
+A macro is declared with `macro` as the kind:
+
+```yoyo
+name: macro (first_param_name: first_param_type) = body;
+```
+
+Macros can take one or two parameters. The second parameter is optional:
+
+```yoyo
+name: macro (left_param: TypeA, right_param: TypeB) = body;
+```
+
+The `MacroDeclaration` node in the compiler stores:
+
+```cpp
+class MacroDeclaration : public Statement {
+    std::unique_ptr<Statement> body;
+    std::pair<std::string, std::string> first_param;           // (name, type)
+    std::optional<std::pair<std::string, std::string>> second_param; // optional
+    std::string name;
+};
+```
+
+## Invocation Syntax
+
+Macros are invoked with a distinct syntax that separates them visually from function calls:
+
+```yoyo
+macro_name! left_expression
+```
+
+or, with a right-hand expression:
+
+```yoyo
+macro_name! left_expression, right_expression
+```
+
+The `MacroInvocation` expression node stores:
+- `macro_name` — the macro being called
+- `left` — the left argument (either an expression or a list of tokens)
+- `right` — an optional right argument expression
+
+## How Macros Differ from Functions
+
+<Tabs>
+  <Tab title="Macros">
+    - Receive unevaluated expressions
+    - Can inspect and transform syntax
+    - Resolved at compile time
+    - Cannot be stored or passed as values
+    - Declared with `macro` keyword
+    - Invoked with `!` syntax
+  </Tab>
+  <Tab title="Functions">
+    - Receive evaluated, typed values
+    - Operate on runtime values
+    - Called at runtime (or inlined)
+    - Can be stored and passed as first-class values
+    - Declared with `fn` keyword
+    - Invoked with `()` call syntax
+  </Tab>
+</Tabs>
+
+## Result Expression
+
+A `MacroInvocation` node has a `result` field (`std::unique_ptr<Expression>`) that is populated by the compiler after macro expansion. The result is the expression that the macro produces — it replaces the macro invocation in the AST.
+
+## Relationship to the Borrow Checker
+
+The borrow checker handles `MacroDeclaration` statements (`void operator()(MacroDeclaration*)`) and `MacroInvocation` expressions (`Value operator()(MacroInvocation*)`). This means macro declarations and invocations participate in the borrow-checking analysis like any other construct.
+
+## Token-Based Arguments
+
+The `left` field of `MacroInvocation` can be either:
+- An `Expression` — a fully parsed expression passed to the macro
+- A `vector<pair<Token, SourceLocation>>` — a raw token sequence, allowing macros to receive unparsed syntax
+
+This dual form enables macros to implement both expression-level and syntax-level transformations.
+
+## Current Status
+
+<AccordionGroup>
+  <Accordion title="What is implemented">
+    - `MacroDeclaration` is parsed and represented in the AST
+    - `MacroInvocation` is parsed and represented as an expression
+    - The borrow checker visits macro declarations and invocations
+    - The type system has a placeholder for macro results
+  </Accordion>
+  <Accordion title="What is in progress">
+    - Full macro expansion logic in the IR generator
+    - Hygienic name resolution inside macro bodies
+    - Error reporting for malformed macro invocations
+    - Documentation of the macro standard library (if any)
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+If you need compile-time code generation today, consider using generic functions with interface constraints as an alternative — they are fully implemented and cover many use cases that macros target.
+</Note>

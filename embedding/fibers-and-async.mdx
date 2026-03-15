@@ -1,0 +1,173 @@
+---
+title: "Fibers and async execution"
+description: "Cooperative coroutines, the Runtime scheduler, and async patterns in Yoyo."
+---
+
+Yoyo uses a cooperative coroutine model for concurrency. Each unit of work runs in a **fiber** — a lightweight coroutine built on [minicoro](https://github.com/edubart/minicoro). A central `Runtime` struct schedules fibers, advancing each one until it yields or completes.
+
+## The Runtime struct
+
+`Runtime` is the scheduler embedded inside every `Engine`. You do not construct it directly; it is a protected member of `Engine` and driven by `Engine::execute()`.
+
+```cpp
+struct Runtime {
+    std::vector<mco_coro*>                            routs;             // live coroutines
+    std::vector<mco_coro*>                            dead_coros;        // completed coroutines awaiting cleanup
+    std::unordered_map<mco_coro*, bool>               is_externally_owned; // true when owned by a Fiber RAII object
+    std::vector<std::pair<mco_coro*,
+        std::variant<mco_coro*, TimePoint,
+                     std::monostate>>> waiting;   // coroutines blocked on another coro, a timer, or nothing
+
+    void run();         // advance all fibers until none are runnable
+    void add_job(mco_coro*);     // enqueue a coroutine
+    void release_job(mco_coro*); // mark a coroutine for cleanup
+};
+```
+
+`run()` is the inner scheduling loop. `Engine::execute()` calls `run()` after setting up any pending fibers.
+
+## The Fiber RAII wrapper
+
+`Fiber` is a move-only RAII type that pairs a coroutine with its parameter and return-value buffers:
+
+```cpp
+struct Fiber {
+    void*    parameters; // write arguments here before execute()
+    void*    return_val; // read the return value here after execute()
+    mco_coro* coro;      // underlying minicoro coroutine
+    Runtime*  rt;        // back-pointer to the runtime
+
+    Fiber(void* param, void* ret_val, mco_coro* coro, Runtime* rt);
+    Fiber(const Fiber&) = delete; // non-copyable
+
+    template<typename T>
+    T get();      // move return value out and call forget()
+
+    void forget(); // release the coroutine without reading the return value
+
+    ~Fiber();      // calls release_job(coro) if forget() was not already called
+};
+```
+
+### Creating a fiber
+
+```cpp
+Yoyo::Fiber fib = engine.createFiber(fn); // fn is a FunctionTy
+```
+
+The coroutine is created and added to the runtime's job queue. Execution does not begin until `execute()` is called.
+
+### Writing arguments
+
+Set arguments through `Fiber::parameters` before calling `execute()`:
+
+```cpp
+*(int32_t*)fib.parameters = 42;
+engine.execute();
+```
+
+### Reading the return value
+
+After `execute()` returns, call `get<T>()` to move the value out of the return buffer:
+
+```cpp
+int32_t result = fib.get<int32_t>();
+```
+
+`get<T>()` internally calls `forget()` after the move, so the destructor will not double-release.
+
+### `forget()`
+
+If you do not need the return value, call `forget()` explicitly:
+
+```cpp
+fib.forget(); // release the coroutine immediately
+```
+
+After `forget()`, the `Fiber` object holds a null coroutine pointer and the destructor is a no-op.
+
+### Destructor
+
+If neither `get<T>()` nor `forget()` has been called, the destructor calls `rt->release_job(coro)` to clean up the coroutine.
+
+## `Engine::execute()` and `Runtime::run()`
+
+`execute()` is defined on the base `Engine` class and calls `rt.run()`. It runs until every queued fiber has either completed or is waiting on a timer or external event.
+
+```cpp
+engine.execute(); // blocks until all fibers are done
+```
+
+You can call `execute()` multiple times, each time adding new fibers first:
+
+```cpp
+for (int i = 0; i < 10; ++i) {
+    auto fib = engine.createFiber(fn);
+    *(int32_t*)fib.parameters = i;
+    engine.execute();
+}
+```
+
+## `Engine::sleep()`
+
+A Yoyo fiber can yield back to the scheduler for a fixed duration using `Engine::sleep()`. Two overloads are available:
+
+```cpp
+// Duration-based overload (any std::chrono duration)
+template<class Rep, class Period>
+void sleep(const std::chrono::duration<Rep, Period>& sleep_duration);
+
+// Millisecond overload
+void sleep(uint64_t milliseconds);
+```
+
+The duration-based overload converts to milliseconds and calls the integer overload. Inside a running Yoyo script, `sleep` causes the current fiber to suspend and re-enter the scheduler's wait queue with a wake-up time-point. Other fibers continue running while this one waits.
+
+## Waiting states
+
+The `Runtime::waiting` list stores three kinds of blocked fibers:
+
+| Wait variant | Type | Meaning |
+|---|---|---|
+| Waiting on another fiber | `mco_coro*` | Blocked until the named coroutine completes. Used by `spawn`. |
+| Waiting on a timer | `TimePoint` | Blocked until the wall-clock time is reached. Used by `sleep`. |
+| Unconditionally runnable | `std::monostate` | Yielded voluntarily; will be re-scheduled on the next tick. |
+
+## Spawning fibers from Yoyo scripts
+
+Yoyo's `spawn` expression launches a new fiber from within a running script. The spawned computation runs concurrently with other fibers under the same `Runtime`. The calling fiber can await the result.
+
+```yoyo
+worker: fn(n: i32) -> i32 = return n * 2;
+
+main: fn = {
+    handle := spawn worker(21);
+    // ... other work ...
+    result := handle.await; // blocks until worker completes
+}
+```
+
+On the C++ side, no extra setup is required — spawned fibers are automatically tracked by the `Runtime`. The scheduler's `add_job()` is called internally when a `spawn` expression is evaluated.
+
+## External ownership flag
+
+`Runtime::is_externally_owned` tracks whether each coroutine is owned by a `Fiber` RAII object on the C++ side. When the flag is `true`, the runtime does not delete the coroutine on completion — the `Fiber` destructor or `forget()` call is responsible for cleanup.
+
+This prevents double-free when C++ code holds a `Fiber` while the scheduler also references the underlying `mco_coro*`.
+
+## Summary of concurrency primitives
+
+<CardGroup cols={2}>
+  <Card title="Fiber" icon="circle-dot">
+    A single cooperative coroutine. Created from C++ via `createFiber()` or from Yoyo via `spawn`. Holds parameter and return-value buffers.
+  </Card>
+  <Card title="Runtime" icon="gear">
+    The scheduler. Owned by every `Engine`. Drives all fibers to completion when `run()` is called.
+  </Card>
+  <Card title="Engine::sleep()" icon="clock">
+    Suspend the current fiber for a duration and yield to other fibers. Accepts any `std::chrono` duration or a raw millisecond count.
+  </Card>
+  <Card title="spawn" icon="bolt">
+    Yoyo language construct that launches a new fiber and returns an awaitable handle.
+  </Card>
+</CardGroup>

@@ -1,0 +1,236 @@
+---
+title: "Engine"
+description: "The abstract Engine base class that manages modules, sources, and the coroutine runtime for a Yoyo scripting environment."
+keywords: ["engine", "YVMEngine", "LLVMEngine", "execute", "sleep", "modules"]
+---
+
+The `Yoyo::Engine` class is the central entry point for embedding Yoyo in a C++ application. It owns all loaded modules and source files, drives the coroutine runtime, and exposes helpers for interacting with Yoyo values from the host side.
+
+Two concrete subclasses are provided out of the box:
+
+- **`YVMEngine`** — uses Yoyo's built-in bytecode virtual machine. Faster to compile, ideal for development and scripting workloads.
+- **`LLVMEngine`** — uses LLVM's ORC JIT. Produces optimised native code at the cost of higher startup overhead.
+
+<Note>
+`Engine` is an abstract class. Always instantiate `YVMEngine` or `LLVMEngine` rather than `Engine` directly.
+</Note>
+
+## Class definition
+
+```cpp
+namespace Yoyo {
+    class Engine {
+    protected:
+        Runtime rt;
+    public:
+        Engine();
+        virtual ~Engine() = default;
+        Engine(Engine&&) noexcept = default;
+
+        virtual void* createGlobalConstant(
+            const Type& type,
+            const std::vector<Constant>& args,
+            IRGenerator*) = 0;
+
+        std::unordered_map<std::string, std::unique_ptr<ModuleBase>> modules;
+        std::unordered_map<std::string,
+            std::pair<std::string, std::vector<std::unique_ptr<Statement>>>> sources;
+
+        static std::string_view viewString(void* str);
+        void execute();
+        void sleep(uint64_t milliseconds);
+        template<class Rep, class Period>
+        void sleep(const std::chrono::duration<Rep, Period>& sleep_duration);
+    };
+}
+```
+
+## Members
+
+### `modules`
+
+```cpp
+std::unordered_map<std::string, std::unique_ptr<ModuleBase>> modules;
+```
+
+All modules that have been registered with this engine, keyed by module name. Both application modules (created via `addAppModule`) and source modules (created via `addModule`) are stored here.
+
+Use this map to look up a `ModuleBase*` before calling `findFunction` on it.
+
+### `sources`
+
+```cpp
+std::unordered_map<std::string,
+    std::pair<std::string, std::vector<std::unique_ptr<Statement>>>> sources;
+```
+
+Parsed AST nodes for every Yoyo source file loaded into the engine. The key is the module name. The value is a pair of the original source string and its parsed statement list. You typically do not need to interact with this map directly.
+
+## Methods
+
+### `execute()`
+
+```cpp
+void execute();
+```
+
+Starts the engine's internal `Runtime` and runs all scheduled coroutines to completion. This call blocks until every active coroutine has finished.
+
+Call `execute()` after compiling all modules and before reading any return values from fibers.
+
+### `sleep(uint64_t milliseconds)`
+
+```cpp
+void sleep(uint64_t milliseconds);
+```
+
+Suspends the **current Yoyo coroutine** for the given number of milliseconds, yielding control back to the runtime scheduler. This must be called from within a running coroutine (i.e. inside `execute()`).
+
+<Warning>
+Calling `sleep` from the host thread outside of a fiber context results in undefined behaviour.
+</Warning>
+
+### `sleep(duration)` — template overload
+
+```cpp
+template<class Rep, class Period>
+void sleep(const std::chrono::duration<Rep, Period>& sleep_duration);
+```
+
+Converts any `std::chrono::duration` to milliseconds and delegates to `sleep(uint64_t)`. This allows you to write readable durations such as `sleep(500ms)` or `sleep(2s)` from native callbacks.
+
+```cpp
+using namespace std::chrono_literals;
+engine.sleep(250ms);  // suspend for 250 milliseconds
+```
+
+### `viewString(void* str)` — static
+
+```cpp
+static std::string_view viewString(void* str);
+```
+
+Returns a non-owning `std::string_view` over the contents of a Yoyo `str` value. The `void*` is the raw pointer passed to a native function registered via `AppModule::addFunction`.
+
+<Warning>
+The returned `string_view` is only valid for the lifetime of the Yoyo string object. Do not store it beyond the current native function call.
+</Warning>
+
+```cpp
+// Inside a native function registered with addFunction:
+void printString(void* s) {
+    auto sv = Yoyo::Engine::viewString(s);
+    std::cout << sv << '\n';
+}
+```
+
+### `createGlobalConstant()` — pure virtual
+
+```cpp
+virtual void* createGlobalConstant(
+    const Type& type,
+    const std::vector<Constant>& args,
+    IRGenerator* irgen) = 0;
+```
+
+Allocates and initialises a global constant value of the given `Type` with the provided constructor arguments. This is called internally by the code-generation pass and is implemented differently by `YVMEngine` and `LLVMEngine`.
+
+You should not call this method directly.
+
+## Concrete subclasses
+
+<Tabs>
+  <Tab title="YVMEngine">
+
+`YVMEngine` compiles Yoyo source to bytecode and runs it on a lightweight stack VM.
+
+```cpp
+#include <yoyo/yvm/yvm_engine.h>
+
+Yoyo::YVMEngine engine;
+auto* mod = engine.addModule("main", R"(
+    pub fn greet(): str { return "hello"; }
+)");
+bool ok = engine.compile();
+engine.prepareForExecution();
+```
+
+Key additional methods on `YVMEngine`:
+
+| Method | Description |
+|--------|-------------|
+| `addModule(name, source)` | Parse and register a Yoyo source module |
+| `addAppModule(name)` | Create a native binding module |
+| `compile()` | Compile all registered source modules; returns `false` on error |
+| `prepareForExecution()` | Link and finalise code before calling `execute()` |
+| `findFunction(mod, name)` | Look up a compiled function by name, returning a `FunctionTy` handle |
+| `createFiber(fn)` | Create a `Fiber` from a `FunctionTy` ready to be scheduled |
+| `addDynamicLibrary(path)` | Load a native shared library to resolve external symbols |
+
+  </Tab>
+  <Tab title="LLVMEngine">
+
+`LLVMEngine` compiles Yoyo source through LLVM's ORC JIT pipeline, emitting optimised native machine code.
+
+```cpp
+#include <yoyo/llvm/llvm_engine.h>
+
+Yoyo::LLVMEngine engine;
+engine.addModule("main", source);
+engine.compile();
+engine.prepareForExecution();
+```
+
+Key additional methods on `LLVMEngine`:
+
+| Method | Description |
+|--------|-------------|
+| `addModule(name, source)` | Parse and register a Yoyo source module |
+| `addAppModule(name)` | Create a native binding module |
+| `compile()` | Compile all registered source modules via LLVM |
+| `prepareForExecution()` | Finalise the JIT dylib before calling `execute()` |
+| `addStaticLibrary(path)` | Link a static archive at JIT time |
+| `addDynamicLibrary(path)` | Load a shared library to resolve external symbols |
+
+  </Tab>
+</Tabs>
+
+## Full example
+
+```cpp
+#include <yoyo/yvm/yvm_engine.h>
+#include <iostream>
+
+int main() {
+    Yoyo::YVMEngine engine;
+
+    // Register a Yoyo source module
+    engine.addModule("math", R"(
+        pub fn square(x: i32): i32 { return x * x; }
+    )");
+
+    // Compile and prepare for execution
+    if (!engine.compile()) {
+        std::cerr << "Compilation failed\n";
+        return 1;
+    }
+    engine.prepareForExecution();
+
+    // Look up and call the function
+    auto* mod = engine.modules.at("math").get();
+    auto fn = engine.findFunction(mod, "square");
+    if (!fn) {
+        std::cerr << "Function not found\n";
+        return 1;
+    }
+
+    auto fiber = engine.createFiber(*fn);
+    int32_t input = 7;
+    std::memcpy(fiber.parameters, &input, sizeof(input));
+
+    engine.execute();
+
+    auto result = fiber.get<int32_t>();
+    std::cout << "square(7) = " << result << '\n'; // 49
+}
+```

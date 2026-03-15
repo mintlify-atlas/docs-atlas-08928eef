@@ -1,0 +1,234 @@
+---
+title: "Structs and Classes"
+description: "Define aggregate data types in Yoyo with structs and classes. Covers fields, methods, constructors, object literals, and ownership semantics."
+---
+
+Yoyo provides two aggregate type forms: **struct** and **class**. Both group named fields and associated methods, but they differ in ownership semantics.
+
+## Struct Declaration
+
+A struct is declared with `struct` as the kind:
+
+```yoyo
+Name: struct = {
+    field1: Type1,
+    field2: Type2,
+    // methods...
+}
+```
+
+From `source.yoyo`:
+
+```yoyo
+Vector2: struct = {
+    x: u32,
+    y: u32
+}
+```
+
+From `tic_tac_toe.yoyo`:
+
+```yoyo
+Game: struct = {
+    data: [Player; 9],
+    player: Player,
+    // ...
+}
+```
+
+## Fields
+
+Fields are declared inside the struct body using the same `name: Type` form as variables. Trailing commas are optional:
+
+```yoyo
+Node: struct::<T> = {
+    data: T,
+    next: (^Node::<T>)?    // optional GC reference to the next node
+}
+```
+
+Fields can be of any type including other structs, arrays, optionals, and GC references.
+
+### Static Fields
+
+The `ClassVariable` structure in the compiler tracks a `is_static` flag, so static fields are supported.
+
+## Methods
+
+Methods are functions declared inside the struct body:
+
+```yoyo
+Game: struct = {
+    data: [Player; 9],
+    player: Player,
+
+    render: fn (&this) = {
+        intermediate := "───┼───┼───";
+        row1 := " ${player_text(&this.data, 0)} │ ${player_text(&this.data, 1)} │ ${player_text(&this.data, 2)} ";
+        row1.test::print();
+    }
+    play: fn (&mut this) = {
+        idx: mut u32 = 10;
+        while (idx > 9 && *this.data[idx] != Player::None) {
+            idx = test::read_uint();
+        }
+        *this.data[idx] = this.player;
+        this.player = this.player.cycle();
+    }
+}
+```
+
+### The `this` parameter
+
+| Receiver | Meaning |
+|----------|---------|
+| `&this` | Immutable reference to `self`; read-only access |
+| `&mut this` | Mutable reference to `self`; can modify fields |
+
+### The `This` type
+
+Inside any struct or class body, `This` is an alias for the enclosing type. Use it in return types and constructors:
+
+```yoyo
+new: fn -> This = return This{ .first = null };
+```
+
+## Constructor Pattern
+
+Yoyo has no dedicated constructor syntax. The conventional pattern is a static method named `new`:
+
+```yoyo
+LinkedList: struct::<T> = {
+    first: (^Node::<T>)?,
+    new: fn -> This = return This{ .first = null };
+    append: fn (&mut this, value: T) = { /* ... */ }
+}
+```
+
+Callers invoke it via scope resolution:
+
+```yoyo
+a: mut = LinkedList::<str>::new();
+```
+
+## Object Literal Syntax
+
+Create a struct value with `.field = value` syntax inside `{}`:
+
+```yoyo
+Type{ .field1 = value1, .field2 = value2 }
+```
+
+Real examples:
+
+```yoyo
+// From linked_list.yoyo
+gcnew Node::<T>{ .data = value, .next = null }
+
+// From tic_tac_toe.yoyo
+return Game{
+    .data = [
+        Player::None, Player::None, Player::None,
+        Player::None, Player::None, Player::None,
+        Player::None, Player::None, Player::None
+    ],
+    .player = Player::X
+};
+```
+
+## Generic Structs
+
+Append `::<TypeParams>` to make a struct generic:
+
+```yoyo
+Node: struct::<T> = {
+    data: T,
+    next: (^Node::<T>)?
+}
+
+LinkedList: struct::<T> = {
+    first: (^Node::<T>)?,
+    new: fn -> This = return This{ .first = null };
+    append: fn (&mut this, value: T) = {
+        // ...
+    }
+}
+```
+
+Instantiate by providing the type argument:
+
+```yoyo
+a: mut = LinkedList::<str>::new();
+b: mut = LinkedList::<i32>::new();
+```
+
+## Ownership: Struct vs Class
+
+The `Ownership` enum in the compiler controls how values are managed:
+
+| Variant | Meaning |
+|---------|---------|
+| `Owning` | Default. The value owns its data; moving transfers ownership. Used by `struct`. |
+| `NonOwning` | The value is a non-owning view / reference type. Used by `struct:&`. |
+| `NonOwningMut` | The value is a non-owning mutable view. |
+
+A `class` declaration uses GC-managed heap allocation and is suitable for types that need shared ownership.
+
+```yoyo
+// Owning struct — value semantics, borrow-checked
+Vector2: struct = {
+    x: u32, y: u32
+}
+
+// Non-owning struct — borrows from elsewhere
+LinkedListIterator: struct:& ::<T> impl core::Iterator::<&T> = {
+    curr: (^Node::<T>)?,
+    // ...
+}
+
+// GC-managed class
+List: class::<T> = {
+    first: (^mut Node::<T>)?
+    // ...
+}
+```
+
+<Note>
+`struct:&` declares a non-owning struct type. The compiler enforces that such types cannot outlive the data they borrow, via the borrow checker.
+</Note>
+
+## Access Specifiers
+
+Members are **private by default**. Apply the `#(public)` attribute to expose a field or method:
+
+```yoyo
+#(public)
+render: fn (&this) = { /* ... */ }
+```
+
+The three specifiers are:
+- `Public` — accessible by any code
+- `Private` — accessible only within the struct
+- `Module` — accessible within the same module
+
+## Interface Implementations
+
+A struct can implement one or more interfaces using the `impl` keyword in the struct header:
+
+```yoyo
+LinkedListIterator: struct:&::<T> impl core::Iterator::<&T> = {
+    curr: (^Node::<T>)?,
+    impl core::Iterator::<&T>
+    {
+        next: fn (&mut this) -> (&T)? = {
+            if |node| (this.curr) {
+                this.curr = node.next;
+                return &node.data;
+            }
+            else return null;
+        }
+    }
+}
+```
+
+See [Interfaces](/language/interfaces) for a full treatment.

@@ -1,0 +1,278 @@
+---
+title: "ModuleBase"
+description: "Base class for all Yoyo modules. Stores registered functions, classes, enums, and other declarations, and provides lookup methods for the compiler and runtime."
+keywords: ["ModuleBase", "module", "functions", "classes", "findFunction", "findClass"]
+---
+
+`Yoyo::ModuleBase` is the abstract base class for all module types in Yoyo. It acts as the central symbol table: the compiler, the IR generator, and native host code all query `ModuleBase` to resolve names to declarations.
+
+The two concrete module implementations, `YVMModule` / `YVMAppModule` and `LLModule` / `LLVMAppModule`, both derive from `ModuleBase`.
+
+## Class definition
+
+```cpp
+namespace Yoyo {
+    class ModuleBase {
+    public:
+        struct FunctionDetails { /* see below */ };
+
+        virtual ~ModuleBase() = default;
+
+        Engine* engine;
+        std::string module_hash;
+        std::unordered_map<std::string, ModuleBase*> modules;
+
+        std::unordered_map<std::string, std::vector<FunctionDetails>> functions;
+        std::unordered_map<std::string,
+            std::vector<std::pair<std::string,
+                std::unique_ptr<ClassDeclaration>>>> classes;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<UnionDeclaration>>> unions;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<GenericFunctionDeclaration>>> generic_fns;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<InterfaceDeclaration>>> interfaces;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<GenericAliasDeclaration>>> generic_aliases;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<GenericInterfaceDeclaration>>> generic_interfaces;
+        std::unordered_map<std::string,
+            std::unordered_map<std::string, Type>> aliases;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<GenericClassDeclaration>>> generic_classes;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<EnumDeclaration>>> enums;
+        std::unordered_map<std::string,
+            std::vector<std::tuple<Type, std::string,
+                std::variant<Constant, ConstantDeclaration*>>>> constants;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<UnionDeclaration>>> generic_unions;
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<MacroDeclaration>>> macros;
+        ModuleOverloadDetails overloads;
+    };
+}
+```
+
+## Members
+
+### `engine`
+
+```cpp
+Engine* engine;
+```
+
+Non-owning pointer back to the `Engine` that owns this module. Use it to reach engine-level services from within a module lookup.
+
+### `module_hash`
+
+```cpp
+std::string module_hash;
+```
+
+A unique string that identifies this module within the engine. Block-qualified symbol names embed this hash to avoid collisions between modules that define identically-named symbols.
+
+### `modules`
+
+```cpp
+std::unordered_map<std::string, ModuleBase*> modules;
+```
+
+Non-owning pointers to other modules that this module has imported. Used by the compiler to resolve cross-module references.
+
+### Declaration maps
+
+Each map groups declarations by their containing **block hash** (a string that encodes the lexical scope in which the declaration appears). The values are vectors because Yoyo supports overloaded names.
+
+| Map | Element type | Contents |
+|-----|-------------|----------|
+| `functions` | `vector<FunctionDetails>` | All named functions |
+| `classes` | `vector<pair<string, unique_ptr<ClassDeclaration>>>` | Named class declarations |
+| `unions` | `vector<unique_ptr<UnionDeclaration>>` | Named union declarations |
+| `generic_fns` | `vector<unique_ptr<GenericFunctionDeclaration>>` | Generic function templates |
+| `interfaces` | `vector<unique_ptr<InterfaceDeclaration>>` | Interface declarations |
+| `generic_aliases` | `vector<unique_ptr<GenericAliasDeclaration>>` | Generic type aliases |
+| `generic_interfaces` | `vector<unique_ptr<GenericInterfaceDeclaration>>` | Generic interfaces |
+| `aliases` | `unordered_map<string, Type>` | Type aliases (per block) |
+| `generic_classes` | `vector<unique_ptr<GenericClassDeclaration>>` | Generic class templates |
+| `enums` | `vector<unique_ptr<EnumDeclaration>>` | Enum declarations |
+| `constants` | `vector<tuple<Type, string, variant<…>>>` | Compile-time constants |
+| `generic_unions` | `vector<unique_ptr<UnionDeclaration>>` | Generic union templates |
+| `macros` | `vector<unique_ptr<MacroDeclaration>>` | Macro declarations |
+
+## `FunctionDetails` struct
+
+```cpp
+struct FunctionDetails {
+    std::string name;
+    FunctionSignature sig;
+    std::vector<Attribute> attributes;
+
+    bool is_private() const;
+};
+```
+
+Holds the metadata the compiler needs about a single function overload.
+
+<ResponseField name="name" type="string">
+  The unqualified name of the function.
+</ResponseField>
+
+<ResponseField name="sig" type="FunctionSignature">
+  The full parsed signature, including parameter types and return type. See `FunctionSignature` in `func_sig.h`.
+</ResponseField>
+
+<ResponseField name="attributes" type="vector<Attribute>">
+  Attributes attached to the function declaration (e.g. `#(public)`).
+</ResponseField>
+
+#### `is_private()`
+
+```cpp
+bool is_private() const;
+```
+
+Returns `true` when the function does **not** carry a `public` attribute. Private functions are inaccessible from outside their declaring module.
+
+## Lookup methods
+
+All `find*` methods search from the innermost scope outwards. The `block` parameter is the block hash of the call site; the methods walk parent scopes automatically.
+
+### `findFunction`
+
+```cpp
+std::pair<std::string, FunctionDetails*>
+    findFunction(const std::string& block, const std::string& name);
+```
+
+Returns the block hash of the found scope and a pointer to the matching `FunctionDetails`. Both members of the pair are empty/null if the function is not found.
+
+### `findGenericFn`
+
+```cpp
+std::pair<std::string, GenericFunctionDeclaration*>
+    findGenericFn(const std::string& block, const std::string& name);
+```
+
+Looks up a generic (template) function declaration by name.
+
+### `findAlias`
+
+```cpp
+Type* findAlias(const std::string& block, const std::string& name);
+```
+
+Returns a pointer to the resolved `Type` for a type alias, or `nullptr` if not found.
+
+### `findGenericAlias`
+
+```cpp
+std::pair<std::string, GenericAliasDeclaration*>
+    findGenericAlias(const std::string& block, const std::string& name);
+```
+
+Looks up a generic alias declaration.
+
+### `findClass`
+
+```cpp
+std::pair<std::string,
+    std::pair<std::string, std::unique_ptr<ClassDeclaration>>*>
+    findClass(const std::string& block, const std::string& name);
+```
+
+Returns the block hash and a pointer to the class entry (which itself is a pair of a secondary hash string and the declaration). Returns `{"" , nullptr}` if not found.
+
+### `findGenericClass`
+
+```cpp
+std::pair<std::string, GenericClassDeclaration*>
+    findGenericClass(const std::string& block, const std::string& name);
+```
+
+Looks up a generic class template.
+
+### `findEnum`
+
+```cpp
+std::pair<std::string, EnumDeclaration*>
+    findEnum(const std::string& block, const std::string& name);
+```
+
+Looks up an enum declaration.
+
+### `findInterface`
+
+```cpp
+std::pair<std::string, InterfaceDeclaration*>
+    findInterface(const std::string& block, const std::string& name);
+```
+
+Looks up an interface declaration.
+
+### `findGenericInterface`
+
+```cpp
+std::pair<std::string, GenericInterfaceDeclaration*>
+    findGenericInterface(const std::string& block, const std::string& name);
+```
+
+Looks up a generic interface declaration.
+
+### `findUnion`
+
+```cpp
+std::pair<std::string, UnionDeclaration*>
+    findUnion(const std::string& block, const std::string& name);
+```
+
+Looks up a union declaration.
+
+### `findConst`
+
+```cpp
+std::pair<std::string,
+    std::tuple<Type, std::string,
+        std::variant<Constant, ConstantDeclaration*>>*>
+    findConst(const std::string& block, const std::string& name);
+```
+
+Looks up a compile-time constant. The tuple contains the constant's type, its mangled name, and either a `Constant` value or a pointer to its declaration.
+
+### `findMacro`
+
+```cpp
+MacroDeclaration* findMacro(const std::string& block, const std::string& name);
+```
+
+Looks up a macro declaration by name. Returns `nullptr` if not found.
+
+### `hashOf`
+
+```cpp
+std::optional<std::string> hashOf(
+    const std::string& base_block,
+    const std::string& name);
+```
+
+Returns the block hash of the scope in which `name` is declared, or `std::nullopt` if the name cannot be found starting from `base_block`. Useful when you need the canonical hash before performing a typed lookup.
+
+## Example
+
+```cpp
+Yoyo::YVMEngine engine;
+engine.addModule("mymod", R"(
+    pub fn add(a: i32, b: i32): i32 { return a + b; }
+)");
+engine.compile();
+engine.prepareForExecution();
+
+Yoyo::ModuleBase* mod = engine.modules.at("mymod").get();
+
+// Resolve the function by searching from the module root scope
+auto [block, details] = mod->findFunction(mod->module_hash, "add");
+if (details) {
+    std::cout << "Found: " << details->name << '\n';
+    std::cout << "Private: " << details->is_private() << '\n';
+}
+```

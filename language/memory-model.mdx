@@ -1,0 +1,182 @@
+---
+title: "Memory Model"
+description: "Understand how Yoyo manages memory: value semantics by default, borrow-checked references, and GC-managed heap allocations with gcnew."
+---
+
+Yoyo's memory model is designed to be safe by default without requiring a runtime garbage collector for most code. It combines three strategies:
+
+1. **Value semantics** — most values are owned and live on the stack.
+2. **Borrow-checked references** — `&T` and `&mut T` are statically proven safe by the borrow checker.
+3. **GC-managed heap** — `^T` values are allocated with `gcnew` and collected by the Boehm GC when no longer reachable.
+
+## Value Semantics by Default
+
+Structs in Yoyo have value semantics: assigning or returning a struct moves its ownership to the new location. The original binding becomes inaccessible.
+
+```yoyo
+a: mut = LinkedList::<str>::new();
+// 'a' owns the LinkedList
+
+b := a; // ownership of the list moves to 'b'
+// 'a' is no longer accessible
+```
+
+Primitives (`i32`, `bool`, `f64`, etc.) are always copied because they are trivially copyable.
+
+## References: `&T` and `&mut T`
+
+References allow you to borrow a value without transferring ownership. The borrow checker ensures that references never outlive the value they point to.
+
+### Immutable Reference — `&T`
+
+Multiple immutable references can coexist simultaneously:
+
+```yoyo
+player_text: fn (p: &[Player; 9], alt: i32) -> str = {
+    // p is borrowed for the duration of this call
+    if (*(*p)[alt] == Player::X) return "X";
+    // ...
+}
+```
+
+Take a reference with the `&` prefix operator:
+
+```yoyo
+app::func(&"${lol.0}: ${*lol.1}");
+```
+
+### Mutable Reference — `&mut T`
+
+A mutable reference is exclusive — no other reference (mutable or immutable) to the same value may exist at the same time:
+
+```yoyo
+append: fn (&mut this, value: T) = {
+    // this is mutably borrowed for the duration of append
+    last.next = gcnew Node::<T>{ .data = value, .next = null };
+}
+```
+
+```yoyo
+play: fn (&mut this) = {
+    *this.data[idx] = this.player;
+    this.player = this.player.cycle();
+}
+```
+
+### Dereferencing
+
+Dereference a reference with the `*` prefix operator:
+
+```yoyo
+*this.data[idx] = this.player;
+```
+
+## GC References: `^T`
+
+For data that needs to outlive a single stack frame or be shared across a data structure, use GC-managed heap allocation.
+
+### Allocating with `gcnew`
+
+```yoyo
+gcnew Expression
+```
+
+This allocates the value on the Boehm GC heap and returns a `^T` reference:
+
+```yoyo
+// From linked_list.yoyo
+last.next = gcnew Node::<T>{ .data = value, .next = null };
+this.first = gcnew Node::<T>{ .data = value, .next = null };
+```
+
+### GC Reference Type Syntax
+
+| Type | Meaning |
+|------|---------|
+| `^T` | GC-managed reference to a `T` |
+| `^mut T` | GC-managed mutable reference to a `T` |
+| `(^T)?` | Optional GC reference (can be `null`) |
+
+From `linked_list.yoyo`:
+
+```yoyo
+Node: struct::<T> = {
+    data: T,
+    next: (^Node::<T>)?   // optional GC reference to next node
+}
+
+LinkedList: struct::<T> = {
+    first: (^Node::<T>)?,
+    // ...
+}
+```
+
+### Boehm GC
+
+Yoyo uses the [Boehm-Demers-Weiser conservative garbage collector](https://www.hboehm.info/gc/) for `^T` allocations. The GC traces the heap conservatively and reclaims unreachable objects. No explicit `free` or destructor call is needed for `^T` values.
+
+<Note>
+Because Boehm GC is conservative, holding large integer values that happen to look like heap pointers can prevent collection. This is a known limitation of conservative GC.
+</Note>
+
+## Ownership Transfer vs Borrowing
+
+<Tabs>
+  <Tab title="Ownership transfer">
+    ```yoyo
+    // a owns the LinkedList
+    a: mut = LinkedList::<str>::new();
+
+    // b takes ownership; a is no longer valid
+    b := a;
+    ```
+  </Tab>
+  <Tab title="Borrowing (immutable)">
+    ```yoyo
+    a: mut = LinkedList::<str>::new();
+
+    // borrow a for the call; a remains valid afterwards
+    iter: fn::<T> (list: &LinkedList::<T>) -> LinkedListIterator::<T> = { ... }
+    my_iter := iter(&a);
+    ```
+  </Tab>
+  <Tab title="Borrowing (mutable)">
+    ```yoyo
+    a: mut = LinkedList::<str>::new();
+
+    // mutably borrow a; no other borrows may exist during this call
+    a.append("Hello");
+    ```
+  </Tab>
+</Tabs>
+
+## Non-Owning Structs: `struct:&`
+
+A struct declared with `struct:&` is a **non-owning view type**. It borrows data from elsewhere and the borrow checker prevents it from outliving that data:
+
+```yoyo
+LinkedListIterator: struct:&::<T> impl core::Iterator::<&T> = {
+    curr: (^Node::<T>)?,
+    // ...
+}
+```
+
+Non-owning structs correspond to the `NonOwning` ownership variant in the compiler.
+
+## Destructors
+
+Yoyo tracks whether types are *trivially destructible*. Types that own heap resources (dynamic arrays, GC references) have non-trivial destructors that run automatically when the owning value goes out of scope.
+
+The `ClassDeclaration` struct in the compiler tracks:
+- `destructor_name` — the name of a custom destructor function
+- `is_trivially_destructible` — lazily evaluated flag
+- `has_clone` — whether the type can be explicitly cloned
+
+## Summary
+
+| Mechanism | Allocation | Lifetime | Ownership |
+|-----------|-----------|----------|-----------|
+| Stack value | Stack | Current scope | Single owner |
+| `&T` | Borrows existing | Limited by borrow checker | Non-owning |
+| `&mut T` | Borrows existing | Limited by borrow checker | Non-owning, exclusive |
+| `^T` | Boehm GC heap | Until GC collects | GC-tracked |

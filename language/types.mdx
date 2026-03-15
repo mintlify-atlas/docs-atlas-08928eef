@@ -1,0 +1,262 @@
+---
+title: "Type System"
+description: "Explore Yoyo's static type system: primitives, compound types, reference types, optionals, results, and type inference."
+---
+
+Yoyo is statically typed. Every value has a type known at compile time. The type system is designed around safety: references are tracked by the borrow checker, ownership is explicit, and implicit conversions are minimal.
+
+## Primitive Types
+
+### Integers
+
+| Type | Width | Signed |
+|------|-------|--------|
+| `i8` | 8-bit | Yes |
+| `i16` | 16-bit | Yes |
+| `i32` | 32-bit | Yes |
+| `i64` | 64-bit | Yes |
+| `u8` | 8-bit | No |
+| `u16` | 16-bit | No |
+| `u32` | 32-bit | No |
+| `u64` | 64-bit | No |
+
+```yoyo
+idx: mut u32 = 10;
+count: i64 = -1;
+```
+
+### Floating Point
+
+| Type | Width |
+|------|-------|
+| `f32` | 32-bit IEEE 754 |
+| `f64` | 64-bit IEEE 754 |
+
+```yoyo
+ratio: f64 = 3.14159;
+```
+
+### Other Primitives
+
+| Type | Description |
+|------|-------------|
+| `bool` | Boolean: `true` or `false` |
+| `void` | No value; used as return type for procedures |
+| `char` | Unicode scalar value |
+| `str` | UTF-8 string |
+| `ptr` | Opaque (untyped) C-compatible pointer |
+
+### Numeric Casts
+
+Use the `as` expression to cast between numeric types:
+
+```yoyo
+narrow: i32 = 42;
+wide: i64 = narrow as i64;
+```
+
+## Compound Types
+
+### Tuples
+
+Tuples group a fixed number of values of potentially different types. The type is written as a parenthesised, comma-separated list:
+
+```yoyo
+pair: (u64, str) = (1, "hello");
+```
+
+Access elements with `.0`, `.1`, etc:
+
+```yoyo
+// From linked_list.yoyo
+for (lol in a.iter().chain(b.iter()).enumerate()) {
+    app::func(&"${lol.0}: ${*lol.1}");
+}
+```
+
+Functions can return tuples to yield multiple values:
+
+```yoyo
+EnumerateIter: struct:&::<T, O> impl core::Iterator::<(u64, O)> = {
+    // ...
+    next: fn (&mut this) -> (u64, O)? = {
+        if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+            this.idx = this.idx + 1;
+            return (this.idx, nxt);
+        }
+        else return null;
+    }
+}
+```
+
+### Optional — `T?`
+
+An optional value either holds a `T` or is absent (`null`). Append `?` to any type:
+
+```yoyo
+first: (^Node::<T>)? = null;
+```
+
+Use conditional extraction to safely unwrap:
+
+```yoyo
+if |node| (this.curr) {
+    // node is the unwrapped value
+    this.curr = node.next;
+    return &node.data;
+}
+else return null;
+```
+
+The `?.` operator propagates null through member access, returning a `MemberType?`:
+
+```yoyo
+the_val := opt?.value1; // type is i32?
+```
+
+### Result — `T!E`
+
+A result type represents either a successful value `T` or an error `E`. Use `.try` / `!` to propagate errors:
+
+```yoyo
+// Function returning a result
+main: fn -> void! = {
+    wnd := Window::new("Wnd", 1280, 720)!;
+    renderer := Renderer::new(wnd)!;
+}
+```
+
+### Static Arrays — `[T; N]`
+
+A fixed-size array of `N` elements of type `T`, allocated inline (on the stack or inside a struct):
+
+```yoyo
+// From tic_tac_toe.yoyo
+data: [Player; 9],
+```
+
+Initialise with an array literal:
+
+```yoyo
+return Game{
+    .data = [
+        Player::None, Player::None, Player::None,
+        Player::None, Player::None, Player::None,
+        Player::None, Player::None, Player::None
+    ],
+    .player = Player::X
+};
+```
+
+### Dynamic Arrays
+
+Dynamic arrays are written `[T]` (no size). They grow at runtime and are heap-allocated:
+
+```yoyo
+// Dynamic array of i32
+buffer: [i32]
+```
+
+## Reference Types
+
+Yoyo distinguishes three kinds of references, each with different ownership semantics.
+
+<CardGroup cols={3}>
+  <Card title="&T" icon="lock">
+    Immutable (shared) reference. Does not own the value. Enforced by the borrow checker.
+  </Card>
+  <Card title="&mut T" icon="pen">
+    Mutable (exclusive) reference. Does not own the value. No other reference may exist simultaneously.
+  </Card>
+  <Card title="^T" icon="recycle">
+    GC-managed heap reference. Owns the allocation. Collected by the Boehm GC.
+  </Card>
+</CardGroup>
+
+### Immutable Reference — `&T`
+
+```yoyo
+// Passing a struct by reference
+player_text: fn (p: &[Player; 9], alt: i32) -> str = {
+    if (*(*p)[alt] == Player::X) return "X";
+    // ...
+}
+```
+
+### Mutable Reference — `&mut T`
+
+```yoyo
+// The `this` parameter is a mutable reference to the receiver
+append: fn (&mut this, value: T) = {
+    // ...
+}
+```
+
+### GC Reference — `^T`
+
+GC references are created with `gcnew` and managed by the Boehm garbage collector:
+
+```yoyo
+// From linked_list.yoyo
+last.next = gcnew Node::<T>{ .data = value, .next = null };
+this.first = gcnew Node::<T>{ .data = value, .next = null };
+```
+
+The node type field uses a GC-optional:
+
+```yoyo
+Node: struct::<T> = {
+    data: T,
+    next: (^Node::<T>)?   // optional GC reference to next node
+}
+```
+
+## Slices
+
+A slice is a non-owning view into a contiguous sequence. Slice types are written with a `:`-qualifier on an array type. They are used primarily when passing array data without transferring ownership.
+
+<Note>
+Slice syntax is evolving. The current implementation tracks slice types via `is_slice()` and `is_mut_slice()` in the type system.
+</Note>
+
+## Type Inference
+
+Yoyo infers types in variable declarations when the initialiser is unambiguous. Use `:=` as shorthand for `: <inferred-type> =`:
+
+```yoyo
+// All types inferred:
+game: mut = Game::new();          // Game
+intermediate := "───┼───┼───";   // str
+idx: mut = 0;                     // integer (smallest fitting type)
+```
+
+Type inference does **not** cross function boundaries — return types must be annotated.
+
+## Type Aliases
+
+Alias declarations give a new name to an existing type:
+
+```yoyo
+MyInt: alias = i32;
+```
+
+Generic aliases are also supported:
+
+```yoyo
+Pair: alias::<T, U> = (T, U);
+```
+
+## Built-in Type Names in the Compiler
+
+Several built-in compound types have internal names used by the compiler's type system:
+
+| Internal Name | User Syntax | Meaning |
+|---------------|-------------|---------|
+| `__tup` | `(A, B, ...)` | Tuple |
+| `__opt` | `T?` | Optional |
+| `__res` | `T!E` | Result |
+| `__ref_mut` | `&mut T` | Mutable reference |
+| `__fn` | function type | Callable / storable function |
+| `__var` | variant | Sum type variant |
+
+These names appear in compiler diagnostics and should not be written directly in user code.

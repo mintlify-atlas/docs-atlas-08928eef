@@ -1,0 +1,288 @@
+---
+title: "Type"
+description: "Represents a Yoyo type at compile/JIT time. Provides query methods for type categories and transformation methods for constructing derived types."
+keywords: ["Type", "is_integral", "is_reference", "saturate", "subtypes", "FunctionSignature"]
+---
+
+`Yoyo::Type` is the value type that represents any Yoyo type expression at compile and JIT time. It is used pervasively throughout the compiler, IR generator, and the AppModule registration API.
+
+## Struct definition
+
+```cpp
+namespace Yoyo {
+    struct Type {
+        std::string name;
+        std::vector<Type> subtypes;
+        std::shared_ptr<FunctionSignature> signature;
+        ModuleBase* module;
+        mutable bool is_mutable = false;
+        bool is_lvalue = false;
+        std::string block_hash;
+    };
+}
+```
+
+## Members
+
+### `name`
+
+```cpp
+std::string name;
+```
+
+The base name of the type. For built-in types this is the keyword (`"i32"`, `"str"`, `"void"`, etc.). For compiler-internal compound types, a leading `__` prefix is used (e.g. `"__tup"` for tuples, `"__opt"` for optionals, `"__ref_mut"` for mutable references).
+
+### `subtypes`
+
+```cpp
+std::vector<Type> subtypes;
+```
+
+Generic type arguments. For `List<i32>` this would hold one entry: `Type{"i32"}`. For tuples and other compound types the relevant sub-types are stored here.
+
+### `signature`
+
+```cpp
+std::shared_ptr<FunctionSignature> signature;
+```
+
+For callable types (`is_function()` or `is_lambda()`), this holds the full function signature including parameter types and return type. `nullptr` for all other types.
+
+### `module`
+
+```cpp
+ModuleBase* module;
+```
+
+Non-owning pointer to the module that owns this type's declaration. `nullptr` for built-in types. Required by the compiler to perform cross-module name resolution.
+
+### `is_mutable`
+
+```cpp
+mutable bool is_mutable = false;
+```
+
+Whether the type carries a `mut` qualifier. Marked `mutable` so that mutability can be adjusted on const `Type` references during type-checking.
+
+### `is_lvalue`
+
+```cpp
+bool is_lvalue = false;
+```
+
+Whether this type is an lvalue reference (as opposed to a moved/consumed value). Used by the IR generator to decide between copy and move semantics.
+
+### `block_hash`
+
+```cpp
+std::string block_hash;
+```
+
+The block hash of the scope in which this type was declared. Used during type resolution to find the correct declaration.
+
+## Query methods
+
+### Numeric
+
+```cpp
+[[nodiscard]] bool is_integral() const;
+[[nodiscard]] bool is_signed_integral() const;
+[[nodiscard]] bool is_unsigned_integral() const;
+[[nodiscard]] bool is_floating_point() const;
+[[nodiscard]] bool is_boolean() const;
+[[nodiscard]] bool is_void() const;      // name == "void"
+[[nodiscard]] bool is_builtin() const;
+[[nodiscard]] bool is_primitive() const; // integral || floating_point || boolean || void
+```
+
+`is_primitive()` is equivalent to `is_integral() || is_floating_point() || is_boolean() || is_void()`.
+
+Helper methods that return the bit-width when applicable:
+
+```cpp
+[[nodiscard]] std::optional<uint32_t> integer_width() const;
+[[nodiscard]] std::optional<uint32_t> float_width() const;
+```
+
+### Compound / language types
+
+```cpp
+[[nodiscard]] bool is_tuple() const;    // name == "__tup"
+[[nodiscard]] bool is_optional() const; // name == "__opt"
+[[nodiscard]] bool is_result() const;   // name == "__res"
+[[nodiscard]] bool is_str() const;      // name == "str"
+[[nodiscard]] bool is_char() const;     // name == "char"
+[[nodiscard]] bool is_variant() const;  // name == "__var"
+[[nodiscard]] bool is_error_ty() const;
+```
+
+### Reference types
+
+```cpp
+[[nodiscard]] bool is_reference() const;
+[[nodiscard]] bool is_mutable_reference() const; // name == "__ref_mut"
+[[nodiscard]] bool is_gc_reference() const;
+```
+
+### Slice and view types
+
+```cpp
+[[nodiscard]] bool is_slice() const;
+[[nodiscard]] bool is_mut_slice() const;
+[[nodiscard]] bool is_view() const;
+[[nodiscard]] bool is_mut_view() const;
+[[nodiscard]] bool is_gc_view() const;
+```
+
+### Array types
+
+```cpp
+[[nodiscard]] bool is_array() const;        // static_array || dynamic_array
+[[nodiscard]] bool is_static_array() const;
+[[nodiscard]] bool is_dynamic_array() const;
+[[nodiscard]] uint32_t static_array_size() const; // only valid when is_static_array()
+```
+
+### Callable types
+
+```cpp
+[[nodiscard]] bool is_function() const;        // name == "__fn"
+[[nodiscard]] bool is_lambda() const;          // name starts with "__lambda"
+[[nodiscard]] bool is_opaque_pointer() const;  // name == "ptr"
+[[nodiscard]] bool is_interface_function() const;
+```
+
+### Ownership / non-owning
+
+```cpp
+[[nodiscard]] bool is_non_owning(IRGenerator* irgen) const;
+[[nodiscard]] bool is_non_owning_mut(IRGenerator* irgen) const;
+[[nodiscard]] bool is_trivially_destructible(IRGenerator* irgen,
+                                              bool consider_no = true) const;
+[[nodiscard]] bool can_be_stored() const;
+```
+
+### Assignment compatibility
+
+```cpp
+[[nodiscard]] bool is_assignable_from(const Type& other, IRGenerator* irgen) const;
+[[nodiscard]] bool can_accept_as_arg(const Type& other, IRGenerator*) const;
+[[nodiscard]] size_t conversion_friction(const Type& other, IRGenerator*) const;
+```
+
+`conversion_friction` returns `0` for an exact match and increases with the number of implicit conversions required.
+
+## Transformation methods
+
+### Mutability and lvalue-ness
+
+```cpp
+[[nodiscard]] Type make_mut() const;
+[[nodiscard]] Type make_lvalue() const;
+[[nodiscard]] Type strip_lvalue() const;
+```
+
+`strip_lvalue()` returns a copy of the type with `is_mutable = false` and `is_lvalue = false`.
+
+### Building reference types
+
+```cpp
+[[nodiscard]] Type reference_to() const;
+[[nodiscard]] Type mutable_reference_to() const;
+[[nodiscard]] Type gc_reference_to() const;
+```
+
+Each method wraps `this` type in the appropriate reference kind and returns the new type.
+
+### Dereferencing
+
+```cpp
+[[nodiscard]] const Type& deref() const;
+```
+
+If the type is a reference, returns the referenced type. Otherwise returns `*this`. Useful when writing logic that should be transparent to reference wrappers.
+
+### Saturation and desaturation
+
+```cpp
+void saturate(ModuleBase* src, IRGenerator* irgen, bool do_verify = true);
+[[nodiscard]] Type saturated(ModuleBase* src, IRGenerator* irgen) const;
+Type desaturate();
+```
+
+*Saturation* resolves alias chains and populates the `module` pointer so that the type is fully qualified and ready for code generation. *Desaturation* strips the module pointer back out, producing a portable representation.
+
+`saturated()` is the non-mutating version; it returns a new `Type` without modifying `this`.
+
+### Extraction
+
+```cpp
+[[nodiscard]] Type extracts_to() const;
+```
+
+Returns the element type that results from extracting one level from a container type (e.g. extracting from `__opt<T>` gives `T`).
+
+### Variant merging
+
+```cpp
+static Type variant_merge(Type a, Type b);
+```
+
+Merges two types into a single variant type. If either input is already a variant, the other type is added to its list (if not already present). If both are identical, the original type is returned unchanged.
+
+## Name methods
+
+```cpp
+[[nodiscard]] std::string full_name() const;
+[[nodiscard]] std::string full_name_no_block() const;
+[[nodiscard]] std::string full_name_no_generics() const;
+[[nodiscard]] std::string pretty_name(const std::string& block) const;
+```
+
+| Method | Description |
+|--------|-------------|
+| `full_name()` | Fully qualified name including block hash and generic arguments |
+| `full_name_no_block()` | Qualified name without the block hash prefix |
+| `full_name_no_generics()` | Qualified name without generic arguments |
+| `pretty_name(block)` | Human-readable name suitable for error messages |
+
+## Size
+
+```cpp
+[[nodiscard]] size_t bitsize(IRGenerator* irgen) const;
+```
+
+Returns the size of the type in bits as computed by the IR generator. Requires a valid `IRGenerator*` so that struct layouts can be queried.
+
+## Equality and ordering
+
+```cpp
+bool operator==(const Type& other) const;
+auto operator<=>(const Type& other) const;
+```
+
+Equality delegates to `is_equal()`. The spaceship operator compares `full_name()` strings lexicographically, satisfying `std::set` ordering requirements without implying a semantic ordering.
+
+```cpp
+[[nodiscard]] bool is_equal(const Type& other) const;
+[[nodiscard]] bool is_shallow_equal(const Type& other) const; // name == other.name only
+```
+
+## Examples
+
+```cpp
+Yoyo::Type t;
+t.name = "i32";
+
+assert(t.is_integral());
+assert(t.is_signed_integral());
+assert(t.is_primitive());
+assert(!t.is_reference());
+
+Yoyo::Type ref = t.reference_to();
+assert(ref.is_reference());
+assert(ref.deref().name == "i32");
+
+Yoyo::Type mut_t = t.make_mut();
+assert(mut_t.is_mutable);
+```

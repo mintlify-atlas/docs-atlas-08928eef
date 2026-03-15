@@ -1,0 +1,177 @@
+---
+title: "Borrow Checker"
+description: "How Yoyo's domain-based borrow checker works: SSA-based CFG analysis, domain constraints, and what safety violations it catches."
+---
+
+Yoyo's borrow checker is a static analysis pass that proves memory safety before code generation. It runs on every function body and rejects programs that could cause use-after-move, dangling references, or aliasing violations.
+
+## Core Concepts
+
+### What the Borrow Checker Catches
+
+<CardGroup cols={2}>
+  <Card title="Use after move" icon="triangle-exclamation">
+    Using a value after its ownership has been transferred to another binding.
+  </Card>
+  <Card title="Dangling references" icon="link-slash">
+    Holding a `&T` or `&mut T` that points to a value that has been dropped or moved.
+  </Card>
+  <Card title="Aliasing violations" icon="copy">
+    Having a `&mut T` and any other reference to the same value alive at the same time.
+  </Card>
+  <Card title="Double free" icon="trash">
+    Dropping the same owned value more than once.
+  </Card>
+</CardGroup>
+
+### Design Approach
+
+Yoyo's borrow checker is **domain-based**: rather than tracking lifetimes as explicit annotations in the type system, it assigns abstract *domains* to values and propagates domain constraints through a Control Flow Graph (CFG). The CFG is in **SSA (Static Single Assignment)** form, which makes dataflow analysis tractable.
+
+## BorrowCheckerType
+
+Every value tracked by the borrow checker has a `BorrowCheckerType` that describes its ownership structure. The type variants are:
+
+| Variant | Description |
+|---------|-------------|
+| `Primitive` | A unit type with no sub-structure (integers, booleans, etc). Stability of domains doesn't matter. |
+| `Aggregate` | A product type (struct) with named fields. Fields are tracked individually. |
+| `Union` | A sum type (union/enum). Unstable: the active variant can change. |
+| `UniquePtr` | An owning pointer. Moving it transfers the allocation. |
+| `Array` | An owning heap array with multiple elements. |
+| `RefPtr` | A non-owning reference (`&T` or `&mut T`). |
+| `LValue` | An lvalue position (e.g. `(*ptr).field`). Used when assigning through pointers. |
+| `Named` | A named aggregate type that can reference itself (for recursive types). |
+
+## Domains
+
+A **domain** is an abstract label attached to reference-containing values. It represents the set of memory locations that a reference might point to.
+
+```
+// Internal domain representation
+struct Domain {
+    name: string    // either a concrete name or '?N (variable)
+}
+```
+
+Domain names that start with `'?` are fresh domain variables introduced during analysis. The name `"null"` is a special domain for values that are provably null.
+
+### Domain Constraints
+
+The borrow checker emits constraint instructions into the CFG and then solves them:
+
+| Instruction | Meaning |
+|-------------|----------|
+| `DomainSubsetConstraint(super, sub)` | `sub` must be a subset of `super` (sub's pointees must all be in super's) |
+| `DomainDependenceEdgeConstraint(d1, d2)` | `d1` and `d2` are linked: one cannot be killed while the other is live |
+| `DomainExtensionConstraint(super, sub)` | The sub domain can expand into super (used for array push etc.) |
+| `DomainPhiInstruction` | Merges domain information at a CFG join point (analogous to SSA phi) |
+
+## The CFG and SSA Form
+
+The borrow checker builds a CFG where each `BasicBlock` contains a list of `Instruction`s. The CFG is then transformed to SSA form by the `transform_to_ssa` pass.
+
+### Key Instructions
+
+```
+NewPrimitiveInstruction  — create a fresh primitive value
+NewAggregateInstruction  — create a struct from fields
+NewArrayInstruction      — create an array from elements
+BorrowValueInstruction   — take a (non-owning) reference to a value
+RelocateValueInstruction — move a value (ownership transfer)
+AssignInstruction        — assign rhs into lhs
+CallFunctionInstruction  — call a function, passing arguments
+DerefOperation           — dereference a reference (LValue)
+DerefLoadOperation       — load through a reference
+DropInstruction          — destroy a value at end-of-scope
+PhiInstruction           — SSA phi for values
+DomainPhiInstruction     — SSA phi for domains
+RetInstruction           — return from the function
+BrInstruction            — unconditional branch
+CondBrInstruction        — conditional branch
+```
+
+## Analysis Phases
+
+The `DomainCheckerState::check_function` method drives the full analysis pipeline:
+
+<Steps>
+  <Step title="Emit CFG">
+    The `BorrowCheckerEmitter` walks the AST and emits CFG instructions for each statement and expression. Every variable gets a borrow-checker type registration.
+  </Step>
+  <Step title="Calculate predecessors">
+    `calc_block_preds()` assigns each basic block its list of predecessor blocks, required for dataflow analysis.
+  </Step>
+  <Step title="Transform to SSA">
+    `transform_to_ssa()` renames values so that each definition site produces a unique name, enabling precise dataflow.
+  </Step>
+  <Step title="Insert domain variables">
+    The `DomainVariableInserter` walks the SSA CFG and inserts domain constraint instructions (`DomainSubsetConstraint`, etc.) based on assignments and borrows.
+  </Step>
+  <Step title="Clear dependence edges">
+    `clear_dependencies()` removes `DomainDependenceEdge` constraints and replaces them with equivalent assignment instructions.
+  </Step>
+  <Step title="Points-to analysis">
+    The `InclusionPointerAnalyser` performs an inclusion-based points-to analysis to determine which domains may alias.
+  </Step>
+  <Step title="Domain validity analysis">
+    `do_domain_validity_analysis()` traverses the CFG and checks that no reference outlives its pointee. Violations are reported as compile errors.
+  </Step>
+</Steps>
+
+## Points-to Graphs
+
+The analysis maintains two levels of points-to information:
+
+- **`PointsToGraph`** — maps domain names to sets of pointees (concrete memory locations). Used during the inclusion-based analysis pass.
+- **`TopLevelPointsToGraph`** — maps high-level domain names to nodes. Used for the final validity check.
+- **`PointeeGraph`** — maps value names to sets of domains they may point into.
+
+## Kill Reasons
+
+When the checker determines that a domain becomes invalid (killed), it records a `KillReason`:
+
+```
+struct KillReason {
+    source: Assign | Drop          // was it killed by reassignment or drop?
+    affected_value: string         // which value caused the kill
+    bad_pointee: string            // which pointee made it ineligible
+    killing_instruction: ASTNode*  // where in the source the kill occurs
+    lvalue_source: optional string // if killed via pointer dereference
+}
+```
+
+This information is used to produce precise compiler error messages pointing at the exact source location of the violation.
+
+## Example: Dangling Reference
+
+The borrow checker would reject the following pattern (pseudocode):
+
+```yoyo
+// ERROR: ref outlives its referent
+dangling: fn -> &i32 = {
+    x: i32 = 42;
+    return &x;   // x is dropped at end of block, but &x would escape
+}
+```
+
+The `DomainSubsetConstraint` generated for the `return &x` forces `'?x_domain` to be a subset of the return domain. Because `x` is dropped (via `DropInstruction`) before the function returns, the return domain is killed, and the checker reports an error.
+
+## Example: Aliasing Violation
+
+```yoyo
+// ERROR: cannot borrow 'a' mutably because it is already borrowed immutably
+// (from actual_bikeshed.yo comments)
+// *get_int(a.0, a.0, a) = 400;
+//            ^^^  ^^^  ^────── Mutable borrow occurs here
+//             │    └─────────── Immutable borrow here
+//             └──────────────── Immutable borrow here
+```
+
+## `BorrowCheckVisitor`
+
+The final check pass (`BorrowCheckVisitor`) visits each instruction and verifies that:
+- Values loaded through a reference (`DerefLoadOperation`) have a live domain.
+- Values obtained by pointer dereference (`DerefOperation`) have not been killed.
+
+All other instructions are considered safe once domain constraints are satisfied.

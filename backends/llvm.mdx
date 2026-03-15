@@ -1,0 +1,274 @@
+---
+title: "LLVM backend"
+description: "JIT-compiles Yoyo to native machine code via LLVM ORC."
+---
+
+The LLVM backend lowers Yoyo's AST to [LLVM IR](https://llvm.org/docs/LangRef.html) and uses the LLVM ORC JIT infrastructure (`LLJIT`) to compile it to native machine code at runtime. Because the output is native code — not interpreted bytecode — the LLVM backend delivers higher throughput for compute-intensive scripts.
+
+## Building with LLVM
+
+<Steps>
+  <Step title="Install LLVM">
+    The LLVM backend requires LLVM to be present on your system. Meson resolves it with `dependency('llvm')`. Any recent LLVM version supported by your distribution should work.
+
+    <Tabs>
+      <Tab title="Debian / Ubuntu">
+        ```bash
+        sudo apt install llvm-dev
+        ```
+      </Tab>
+      <Tab title="Fedora / RHEL">
+        ```bash
+        sudo dnf install llvm-devel
+        ```
+      </Tab>
+      <Tab title="macOS (Homebrew)">
+        ```bash
+        brew install llvm
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Configure the build">
+    Pass `-Dexecutor=llvm` to Meson. Use `-Dllvm_static=true` (the default) to link LLVM statically, or `-Dllvm_static=false` for a dynamic link.
+
+    ```bash
+    meson setup build -Dexecutor=llvm
+    meson compile -C build
+    ```
+
+    To build both backends into the same library:
+
+    ```bash
+    meson setup build -Dexecutor=both
+    ```
+  </Step>
+
+  <Step title="Include the headers">
+    ```cpp
+    #include <llvm/llvm_engine.h>
+    #include <llvm/app_module.h>
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Do not mix a statically-linked LLVM Yoyo build with a dynamically-linked LLVM installation (or vice versa). Mismatched linkage causes duplicate global state inside LLVM and will produce silent runtime errors.
+</Warning>
+
+## `LLVMEngine`
+
+`LLVMEngine` inherits from `Engine` and owns an LLVM `ThreadSafeContext` and an `LLJIT` instance.
+
+```cpp
+class LLVMEngine : public Engine {
+public:
+    llvm::orc::ThreadSafeContext        llvm_context;
+    std::unique_ptr<llvm::orc::LLJIT>   jit;
+
+    LLVMAppModule* addAppModule(const std::string& name);
+    void           addModule(const std::string& module_name, std::string source);
+    void           compile();
+    void           prepareForExecution();
+    void           addStaticLibrary(std::string_view path);
+    void           addDynamicLibrary(std::string_view path);
+    void*          createGlobalConstant(
+                       const Type& type,
+                       const std::vector<Constant>& args,
+                       IRGenerator*
+                   ) override;
+};
+```
+
+### Method reference
+
+| Method | Return type | Description |
+|---|---|---|
+| `addAppModule(name)` | `LLVMAppModule*` | Creates a named C++ app module. Must be called before `compile()`. |
+| `addModule(module_name, source)` | `void` | Parses and registers a Yoyo source module. Returns `void` — unlike `YVMEngine`, there is no pointer to hold on to for later `findFunction()` calls. |
+| `compile()` | `void` | Runs the full pipeline: parsing, type checking, borrow checking, and LLVM IR generation. Errors are reported via LLVM diagnostics rather than a return value. |
+| `prepareForExecution()` | `void` | Finalises and links all compiled LLVM modules via ORC JIT. Must be called before `execute()`. |
+| `addStaticLibrary(path)` | `void` | Links a static archive (`.a` / `.lib`) into the JIT session. Only available on the LLVM backend. |
+| `addDynamicLibrary(path)` | `void` | Loads a native shared library and makes its symbols available to scripts. |
+| `createGlobalConstant(type, args, irgen)` | `void*` | Allocates and initialises a global constant. Called internally by the IR generator. |
+
+<Note>
+  `LLVMEngine::addModule()` returns `void`, whereas `YVMEngine::addModule()` returns `ModuleBase*`. If you need to look up a compiled function after compilation, keep a reference to the module name and use the engine's module map directly.
+</Note>
+
+## `LLVMAppModule`
+
+`LLVMAppModule` bridges C++ code into Yoyo scripts. Its API is identical to `YVMAppModule`.
+
+### `addFunction`
+
+```cpp
+template<typename R, typename... Args>
+Result addFunction(
+    std::string sig_str,   // Yoyo signature, e.g. "(x: i32, y: i32) -> i32"
+    R(*func)(Args...),     // C++ function pointer
+    std::string name       // Name scripts will call
+);
+```
+
+The template validates that the C++ parameter count matches the Yoyo signature (with `sret` accounted for). Possible `Result` values are the same as for the YVM backend:
+
+| Value | Meaning |
+|---|---|
+| `Success` | Registration succeeded. |
+| `NullParameter` | `func` was `nullptr`. |
+| `InvalidSignature` | `sig_str` could not be parsed. |
+| `ParameterCountMismatch` | The number of C++ parameters does not match the signature. |
+| `ReturnTypeMismatch` | `R` is not `void` for an `sret` return type. |
+| `ParameterTypeMismatch` | A parameter type is incompatible. |
+
+### `addEnum`
+
+```cpp
+Result addEnum(
+    std::string enum_name,
+    std::unordered_map<std::string, int32_t> values
+);
+```
+
+### `addClass`
+
+```cpp
+Result addClass(
+    std::string class_name,
+    std::vector<ClassVariable> variables,
+    Ownership sh,
+    std::string block_hash
+);
+```
+
+## How LLVM IR generation works
+
+`LLVMIRGenerator` (defined in `llvm/llvm_irgen.h`) inherits from `IRGenerator` and walks the Yoyo AST to produce an `llvm::Module`.
+
+Each source module becomes a `LLModule`, which holds an `llvm::orc::ThreadSafeModule`. After `compile()` is called, each `ThreadSafeModule` is added to the `LLJIT` session inside `prepareForExecution()`.
+
+Key internal methods:
+
+```cpp
+// Convert a Yoyo Type to an LLVM type
+llvm::Type* ToLLVMType(const Type& type, bool is_ref);
+
+// Convert a Yoyo FunctionSignature to an LLVM function type
+llvm::FunctionType* ToLLVMSignature(const FunctionSignature& sig);
+
+// Emit an alloca in the function entry block (preferred over mid-function allocas)
+llvm::AllocaInst* Alloca(std::string_view name, llvm::Type* type);
+
+// Emit a malloc call and return the pointer
+llvm::Value* Malloc(std::string_view name, llvm::Value* size);
+
+// Emit a GC-managed allocation
+llvm::Value* GCMalloc(llvm::Value* size);
+llvm::Value* GCMalloc(size_t size);
+```
+
+The `LLVMExpressionEvaluator` companion class handles expression lowering, returning `llvm::Value*` for each expression node. It mirrors the structure of `YVMExpressionEvaluator` in the YVM backend but returns LLVM values rather than managing a bytecode stack.
+
+### Module layout
+
+```cpp
+struct LLModule : public ModuleBase {
+    llvm::orc::ThreadSafeModule code;
+
+    std::unordered_map<ClassDeclaration*, llvm::StructType*>  classes_types;
+    std::unordered_map<UnionDeclaration*, llvm::StructType*>  union_types;
+    std::unordered_map<std::string,
+        std::pair<llvm::StructType*, std::unique_ptr<LambdaExpression>>> lambdas;
+
+    llvm::Type* ToLLVMType(const Type& type, const std::string& hash,
+                           IRGenerator*, const std::vector<Type>& disallowed_types);
+    static void makeBuiltinModule(Engine* eng);
+    void dumpIR(); // prints LLVM IR to stdout
+};
+```
+
+Class and union declarations are stored as `llvm::StructType*` maps so that the IR generator can look up the concrete LLVM type for any user-defined Yoyo type during codegen.
+
+## LLVM dependency details
+
+| Option | Default | Notes |
+|---|---|---|
+| `executor` | `yvm` | Set to `llvm` or `both` to enable the LLVM backend. |
+| `llvm_static` | `true` | `true` links LLVM statically; `false` uses the shared library. |
+
+Meson resolves LLVM via `dependency('llvm', static: llvm_static)`. The minimum required LLVM version is whatever version provides `llvm::orc::LLJIT` — LLVM 12 or later is sufficient for all features used by Yoyo.
+
+## Comparison with YVM
+
+| | YVM | LLVM |
+|---|---|---|
+| Runtime speed | Bytecode interpreter | Native machine code |
+| Cold-start latency | Low | Higher (LLVM optimisation passes run at JIT time) |
+| Compile error reporting | `compile()` returns `bool` | `compile()` returns `void`; errors via LLVM diagnostics |
+| libffi required | Yes | No |
+| Static library linking | No | Yes (`addStaticLibrary()`) |
+| IR dump | `YVMModule::dumpIR()` returns `std::string` | `LLModule::dumpIR()` prints to stdout |
+| Debug output | Coloured bytecode listing | Standard LLVM IR text format |
+
+## Known limitations
+
+<Warning>
+  `LLVMEngine::addModule()` returns `void` rather than `ModuleBase*`. You cannot hold a module pointer for later `findFunction()` lookups the same way you can with `YVMEngine`. Consult the engine's internal module map if you need to locate a compiled function after `prepareForExecution()`.
+</Warning>
+
+<Info>
+  Fiber support and the `createFiber()` / `execute()` workflow are defined on the base `Engine` class and work the same way on both backends. The LLVM backend does not expose a `createFiber()` method directly — use `Engine::createFiber()` via a cast or the base class pointer.
+</Info>
+
+## Complete example
+
+```cpp
+#include <iostream>
+#include <string_view>
+
+#include <llvm/llvm_engine.h>
+#include <llvm/app_module.h>
+#include <engine.h>
+
+int32_t my_print(void* arg)
+{
+    std::string_view sv = Yoyo::Engine::viewString(arg);
+    std::cout << sv << '\n';
+    return 0;
+}
+
+void my_assert(bool cond, void* msg)
+{
+    if (!cond)
+        std::cerr << "assertion failed: " << Yoyo::Engine::viewString(msg) << '\n';
+}
+
+int main()
+{
+    std::string source = R"(
+main: fn = {
+    val := 42;
+    test::assert(val == 42, &"val == 42");
+    test::print(&"all checks passed");
+})";
+
+    Yoyo::LLVMEngine engine;
+
+    // 1. Register C++ functions in an app module
+    auto* app = engine.addAppModule("test");
+    app->addFunction("(x: &str) -> i32",          my_print,  "print");
+    app->addFunction("(x: bool, y: &str) -> void", my_assert, "assert");
+
+    // 2. Load Yoyo source (addModule returns void on LLVMEngine)
+    engine.addModule("main", source);
+
+    // 3. Compile — errors go to LLVM diagnostics
+    engine.compile();
+
+    // 4. Finalise and run
+    engine.prepareForExecution();
+    engine.execute();
+}
+```

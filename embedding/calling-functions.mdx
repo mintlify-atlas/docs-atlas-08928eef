@@ -1,0 +1,215 @@
+---
+title: "Calling Yoyo functions from C++"
+description: "Look up compiled Yoyo functions, create fibers, pass arguments, and read return values."
+---
+
+After compiling your engine, you can call any Yoyo function from C++ by looking it up, wrapping it in a `Fiber`, setting arguments, and running the scheduler.
+
+## Step-by-step
+
+<Steps>
+  <Step title="Look up the function">
+    Call `findFunction()` on the engine, passing the `ModuleBase*` returned by `addModule()` and the function's fully-qualified mangled name.
+
+    ```cpp
+    std::optional<Yoyo::FunctionTy> fn =
+        engine.findFunction(mod, "main::main");
+
+    if (!fn.has_value()) {
+        // function not found
+    }
+    ```
+
+    The name format is `"module_hash::function_name"`. For a module registered as `"source"` with a top-level function `main`, the lookup name is `"source::main"`.
+
+    <Note>
+      `findFunction()` is currently available on `YVMEngine`. The LLVM backend does not yet expose a public `findFunction()` method.
+    </Note>
+  </Step>
+
+  <Step title="Create a fiber">
+    Pass the `FunctionTy` to `createFiber()` to get a `Fiber` RAII object:
+
+    ```cpp
+    Yoyo::Fiber fib = engine.createFiber(fn.value());
+    ```
+
+    Creating the fiber allocates the coroutine stack and parameter/return-value buffers but does not start execution.
+  </Step>
+
+  <Step title="Set arguments">
+    The `Fiber::parameters` pointer points to the raw argument buffer. Write your arguments there before calling `execute()`.
+
+    For scalar types, cast `parameters` to the appropriate pointer and assign:
+
+    ```cpp
+    // Yoyo function takes a single i32
+    *(int32_t*)fib.parameters = 42;
+    ```
+
+    For a function with no parameters, skip this step.
+  </Step>
+
+  <Step title="Execute">
+    Call `engine.execute()` to run all live fibers to completion:
+
+    ```cpp
+    engine.execute();
+    ```
+  </Step>
+
+  <Step title="Read the return value">
+    After `execute()` returns, use `Fiber::get<T>()` to read the return value:
+
+    ```cpp
+    int32_t result = fib.get<int32_t>();
+    ```
+
+    `get<T>()` moves the value out of the return buffer and calls `forget()` on the fiber, releasing the coroutine. Do not call `get<T>()` more than once.
+  </Step>
+</Steps>
+
+## Helper pattern from the test suite
+
+The following helper function from `ir_gen_test.cpp` encapsulates the lookup-and-create pattern:
+
+```cpp
+Yoyo::Fiber createFiberFor(Yoyo::ModuleBase* mod,
+                           const std::string& function_name)
+{
+    auto eng = dynamic_cast<Yoyo::YVMEngine*>(mod->engine);
+    return eng->createFiber(
+        eng->findFunction(mod, function_name).value()
+    );
+}
+```
+
+Usage:
+
+```cpp
+auto fib = createFiberFor(mod, "source::main");
+*(int32_t*)fib.parameters = i;
+engine.execute();
+```
+
+## Reading string return values
+
+Yoyo `str` values are heap-allocated structs. Use `Engine::viewString()` to produce a `std::string_view` without copying the data:
+
+```cpp
+std::string_view sv = Yoyo::Engine::viewString(ptr);
+```
+
+`viewString()` is a static method on `Engine`. It accepts a `void*` to the Yoyo string struct and returns a view into the string's internal buffer. The view is valid only as long as the Yoyo string is alive.
+
+This is the same utility used inside registered C++ functions to read `&str` arguments:
+
+```cpp
+int32_t my_print(void* arg)
+{
+    std::string_view sv = Yoyo::Engine::viewString(arg);
+    std::cout << sv << std::endl;
+    return 0;
+}
+```
+
+## Calling the same function multiple times
+
+Each call to `createFiber()` produces a fresh `Fiber`. Create a new fiber for every invocation:
+
+```cpp
+// Call main 10 times with different arguments
+for (int i = 0; i < 10; ++i)
+{
+    auto fib = createFiberFor(mod, "source::main");
+    *(int32_t*)fib.parameters = i;
+    engine.execute();
+}
+```
+
+This pattern comes directly from the index-operator test in `ir_gen_test.cpp`:
+
+```cpp
+for (auto i : std::views::iota(0, 10)) {
+    auto fib = createFiberFor(mod, "source::main");
+    *(int32_t*)fib.parameters = i;
+    engine.execute();
+}
+```
+
+## `Fiber::forget()`
+
+Call `forget()` when you do not need the return value and want to release the coroutine immediately:
+
+```cpp
+fib.forget();
+```
+
+`forget()` calls `Runtime::release_job()` and sets the internal coroutine pointer to null, preventing the destructor from releasing it a second time. `get<T>()` calls `forget()` internally after moving the return value out.
+
+## `FunctionTy` structure
+
+`FunctionTy` is an opaque descriptor for a compiled Yoyo function on the YVM backend:
+
+```cpp
+struct FunctionTy {
+    uint64_t*      code;        // pointer into the compiled bytecode
+    StructNativeTy* params;     // parameter type descriptor
+    NativeTy*       ret;        // return type descriptor
+    bool            should_sret; // true when return value is passed by pointer
+};
+```
+
+You do not need to inspect `FunctionTy` directly — pass it straight to `createFiber()`.
+
+## Full example
+
+```cpp
+#include <iostream>
+#include <string>
+#include <string_view>
+
+#include <engine.h>
+#include <yvm/yvm_engine.h>
+#include <yvm/app_module.h>
+
+void my_assert(bool cond, void* msg)
+{
+    if (!cond)
+        std::cerr << "FAIL: " << Yoyo::Engine::viewString(msg) << '\n';
+}
+
+Yoyo::Fiber createFiberFor(Yoyo::ModuleBase* mod,
+                           const std::string& name)
+{
+    auto* eng = dynamic_cast<Yoyo::YVMEngine*>(mod->engine);
+    return eng->createFiber(eng->findFunction(mod, name).value());
+}
+
+int main()
+{
+    std::string source = R"(
+main: fn(n: i32) -> bool = {
+    test::assert(n >= 0, &"n must be non-negative");
+    return n > 5;
+}
+)";
+
+    Yoyo::YVMEngine engine;
+
+    auto app = engine.addAppModule("test");
+    app->addFunction("(x: bool, y: &str) -> void", my_assert, "assert");
+
+    auto* mod = engine.addModule("source", source);
+    if (!engine.compile()) return 1;
+    engine.prepareForExecution();
+
+    for (int i = 0; i < 10; ++i) {
+        auto fib = createFiberFor(mod, "source::main");
+        *(int32_t*)fib.parameters = i;
+        engine.execute();
+        bool result = fib.get<bool>();
+        std::cout << i << " -> " << result << '\n';
+    }
+}
+```

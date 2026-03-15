@@ -1,0 +1,225 @@
+---
+title: "Enums and Unions"
+description: "Declare enums and tagged unions in Yoyo. Covers enum variants, pattern matching, union sum types, and conditional extraction."
+---
+
+Yoyo provides two ways to express a value that can be one of several alternatives: **enums** for simple discriminated integers, and **unions** for tagged unions (sum types) that can carry associated data.
+
+## Enums
+
+### Declaration
+
+An enum is declared with `enum` as the kind. Variants are listed by name:
+
+```yoyo
+Name: enum = { Variant1, Variant2, Variant3 }
+```
+
+From `tic_tac_toe.yoyo`:
+
+```yoyo
+Player: enum = { X, O, None }
+```
+
+From `actual_bikeshed.yo`:
+
+```yoyo
+LintType: enum = {
+    Error, Warn, Info
+}
+```
+
+### Accessing Variants
+
+Variants are accessed via scope resolution `EnumName::Variant`:
+
+```yoyo
+Player::X
+Player::O
+Player::None
+```
+
+### Comparing Enum Values
+
+Enum values can be compared with `==` and `!=`:
+
+```yoyo
+cycle: fn (p: Player) -> Player = {
+    if (p == Player::X) return Player::O;
+    else if (p == Player::O) return Player::X;
+    return p;
+}
+```
+
+### Enums as Struct Fields
+
+Enum types are valid field types and can be stored in arrays:
+
+```yoyo
+Game: struct = {
+    data: [Player; 9],
+    player: Player,
+    // ...
+}
+```
+
+Initialise an array of enum values:
+
+```yoyo
+.data = [
+    Player::None, Player::None, Player::None,
+    Player::None, Player::None, Player::None,
+    Player::None, Player::None, Player::None
+]
+```
+
+### Methods on Enums
+
+Enums can have associated methods declared inside their body (stored alongside the `stats` list in the compiler):
+
+```yoyo
+Player: enum = {
+    X, O, None,
+    // Methods can be placed here
+}
+```
+
+<Note>
+Enum variants have integer values assigned by the compiler. The internal representation stores them as `i32` (via the `values: unordered_map<string, int32_t>` field in `EnumDeclaration`).
+</Note>
+
+## Unions (Tagged Unions / Sum Types)
+
+Unions in Yoyo are **tagged unions** — each variant can carry associated data. They are similar to Rust enums.
+
+### Declaration
+
+```yoyo
+Name: union = {
+    Variant1: void,    // no data
+    Variant2,          // implicit void
+    Variant3: TypeA,
+    Variant4: TypeA & TypeB,  // multiple payloads
+}
+```
+
+From `unions.yoyo`:
+
+```yoyo
+Message: union = {
+    Quit: void,
+    Start,              // implicit : void
+    Move: i32 & i32,    // two i32 payloads
+    Write: str,
+    ChangeColor: i32 & i32 & i32
+}
+```
+
+### Constructing Union Variants
+
+```yoyo
+lol: mut Message = Message::Quit;
+```
+
+### Checking a Union Variant
+
+Use `is` to test the active variant without extracting data:
+
+```yoyo
+if (lol is Message::Quit) {
+    // lol holds the Quit variant
+}
+```
+
+### Extracting Union Data
+
+Use the conditional extraction form `if |name| (expr as Variant)` to unwrap data from a specific variant:
+
+```yoyo
+if |move_data| (lol as Message::Move) {
+    // move_data holds the i32 & i32 payload of the Move variant
+}
+```
+
+### Methods on Unions
+
+Method functions can be declared inside a union body:
+
+```yoyo
+Message: union = {
+    Quit: void,
+    Write: str,
+    // member function
+    broadcast: fn (this, b: Broadcaster) -> void! = return b.perform_broadcast(this);
+}
+```
+
+## Conditional Extraction
+
+Conditional extraction is a first-class control-flow construct that safely unwraps optional and union values:
+
+```yoyo
+if |name| (expr) {
+    // name is the extracted (inner) value
+} else {
+    // expr was null / unmatched
+}
+```
+
+It works for:
+- **Optionals** (`T?`) — extracts `T` if the optional has a value
+- **Union variants** — extracts the payload if the active variant matches
+
+### Optional extraction
+
+```yoyo
+// From linked_list.yoyo
+if |val| (this.first) {
+    last: mut = val;
+    // ...
+} else {
+    this.first = gcnew Node::<T>{ .data = value, .next = null };
+}
+```
+
+### Chained extraction
+
+```yoyo
+// From linked_list.yoyo
+if |nxt| (last.next) last = nxt;
+else should_loop = false;
+```
+
+### Extraction with else capture
+
+The `else` branch can also capture the error value for result types:
+
+```yoyo
+// Conceptually: if |value| (result_expr) { ok } else |err| { handle error }
+```
+
+### Capture modes
+
+The `ConditionalExtraction` AST node supports three capture modes:
+
+| Mode | Description |
+|------|-------------|
+| `Own` | Take ownership of the extracted value |
+| `Ref` | Borrow the extracted value immutably (`&T`) |
+| `RefMut` | Borrow the extracted value mutably (`&mut T`) |
+
+### Using extraction in loop conditions
+
+```yoyo
+// From tic_tac_toe.yoyo
+while (true) {
+    game.play();
+    game.render();
+    if |winner| (game.check_winner()) {
+        if (winner != Player::None) {
+            "${winner} won".test::print();
+            break;
+        }
+    }
+}
+```

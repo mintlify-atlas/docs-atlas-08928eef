@@ -1,0 +1,243 @@
+---
+title: "Scanner"
+description: "Lexer that tokenises Yoyo source text into a stream of Token values. Used internally by Parser."
+keywords: ["Scanner", "Token", "TokenType", "NextToken", "lexer", "scanner"]
+---
+
+`Yoyo::Scanner` is the lexer for Yoyo. It reads source text character by character and produces `Token` values that the `Parser` consumes. Most embedding scenarios do not interact with the `Scanner` directly — it is constructed and owned by `Parser` — but it is part of the public API and is accessible via `Parser::getScanner()`.
+
+## Class definition
+
+```cpp
+namespace Yoyo {
+    class Scanner {
+    public:
+        explicit Scanner(std::string_view source);
+
+        std::optional<Token> NextToken();
+        std::optional<Token> NextTokenInternal();
+        size_t GetLine();
+        [[nodiscard]] size_t GetOffset() const;
+        [[nodiscard]] SourceLocation GetSourceLocation() const;
+    };
+}
+```
+
+## Constructor
+
+```cpp
+explicit Scanner(std::string_view source);
+```
+
+<ParamField path="source" type="std::string_view" required>
+  A non-owning view over the source text to scan. The view must remain valid for the entire lifetime of the `Scanner`.
+</ParamField>
+
+The constructor initialises keyword recognition. All Yoyo keywords are registered in an internal `unordered_map<string_view, TokenType>` so that identifier scanning can distinguish keywords from user-defined names in O(1).
+
+## Methods
+
+### `NextToken()`
+
+```cpp
+std::optional<Token> NextToken();
+```
+
+Returns the next meaningful token, skipping whitespace (including newlines in most contexts), line comments (`//`), and block comments (`/* */`). Returns `std::nullopt` at end-of-file.
+
+This is the method called by `Parser::Get()` and `Parser::Peek()`.
+
+### `NextTokenInternal()`
+
+```cpp
+std::optional<Token> NextTokenInternal();
+```
+
+Returns the next raw token without filtering whitespace or comments. `NextToken()` calls this in a loop, discarding trivial tokens. You generally do not need to call this directly.
+
+### `GetLine()`
+
+```cpp
+size_t GetLine();
+```
+
+Returns the 1-based line number of the scanner's current position (after the most recently returned token).
+
+### `GetOffset()`
+
+```cpp
+[[nodiscard]] size_t GetOffset() const;
+```
+
+Returns the current byte offset into the source string. Together with `GetLine()`, this allows you to map a token position back to a location in the original source.
+
+### `GetSourceLocation()`
+
+```cpp
+[[nodiscard]] SourceLocation GetSourceLocation() const;
+```
+
+Returns a `SourceLocation` struct capturing the current line, column, and byte offset in one call. Used by the parser to attach precise locations to AST nodes.
+
+## `Token` struct
+
+```cpp
+namespace Yoyo {
+    struct Token {
+        TokenType    type;
+        SourceLocation loc;
+        std::string_view text;
+
+        [[nodiscard]] bool is_assignment() const;
+        [[nodiscard]] bool can_be_overloaded() const;
+        [[nodiscard]] bool can_be_overloaded_binary_only() const;
+    };
+}
+```
+
+<ResponseField name="type" type="TokenType">
+  The category of this token. See the `TokenType` table below.
+</ResponseField>
+
+<ResponseField name="loc" type="SourceLocation">
+  Source location (line, column, offset) of this token.
+</ResponseField>
+
+<ResponseField name="text" type="std::string_view">
+  Non-owning view of the token's text within the original source string. Valid as long as the source string outlives the token.
+</ResponseField>
+
+#### `is_assignment()`
+
+Returns `true` for assignment operators: `=`, `+=`, `-=`, `/=`, `*=`, `%=`, `&=`, `|=`, `^=`.
+
+#### `can_be_overloaded()`
+
+Returns `true` for operators that may appear in a Yoyo `operator` overload definition (both unary and binary variants).
+
+#### `can_be_overloaded_binary_only()`
+
+Returns `true` for operators that can only be overloaded in binary (two-operand) form.
+
+## `TokenType` enum
+
+```cpp
+enum class TokenType {
+    Invalid, Eof, NewLine,
+    Identifier, SPIdentifier,
+
+    // Keywords — control flow
+    If, Else, While, For,
+
+    // Operators
+    Plus, Minus, Slash, Star, Bang, Percent,
+    Equal, BangEqual,
+    PlusEqual, MinusEqual, SlashEqual, StarEqual, PercentEqual,
+    AmpersandEqual, PipeEqual, CaretEqual,
+    Less, Greater, DoubleEqual, LessEqual, GreaterEqual,
+    DoubleColon, Colon, Arrow,
+    LParen, RParen, RCurly, LCurly, LSquare, RSquare,
+    Dot, Comma,
+    Ampersand, Pipe, DoubleAmpersand, DoublePipe,
+    Caret,
+    DoubleGreater, DoubleLess,
+    Spaceship,      // <=>
+    TemplateOpen,   // ::<
+
+    // Literals
+    IntegerLiteral, RealLiteral, StringLiteral, CharLiteral,
+    True, False, Null,
+
+    // Declaration keywords
+    Class, Struct, Enum, EnumFlag, Union, Scheme, Interface,
+    Module, Using, Alias, Fn, Macro,
+
+    // Statement / expression keywords
+    SemiColon, In, InOut, This, Operator, Return, Called,
+    Tilde, Pub, Static, Mod, With, As, Spawn, Try,
+    Underscore, Mut, RefMut, GCNew, Impl,
+    Break, Continue, Directive, Const, View,
+    Question, BackSlash,
+    DoubleDot, DoubleDotEqual,
+    SlashBrace,   // \}
+    AttrOpen,     // #(
+
+    // Operator overload only
+    SquarePair,    // []
+    SquarePairMut, // mut []
+};
+```
+
+<AccordionGroup>
+  <Accordion title="Structural tokens">
+
+| Value | Text | Description |
+|-------|------|-------------|
+| `Invalid` | — | Represents a scan error |
+| `Eof` | — | End of source |
+| `NewLine` | `\n` | Significant newline (used for automatic semicolon insertion) |
+| `Identifier` | user text | A plain identifier |
+| `SPIdentifier` | user text | A special-prefixed identifier |
+| `SemiColon` | `;` | Statement terminator |
+| `Comma` | `,` | Separator |
+| `Dot` | `.` | Member access |
+| `DoubleColon` | `::` | Scope resolution |
+| `Colon` | `:` | Type annotation separator |
+| `Arrow` | `->` | Return type separator / pointer member access |
+
+  </Accordion>
+  <Accordion title="Bracket tokens">
+
+| Value | Text |
+|-------|------|
+| `LParen` | `(` |
+| `RParen` | `)` |
+| `LCurly` | `{` |
+| `RCurly` | `}` |
+| `LSquare` | `[` |
+| `RSquare` | `]` |
+| `TemplateOpen` | `::<` |
+| `AttrOpen` | `#(` |
+| `SlashBrace` | `\}` |
+| `SquarePair` | `[]` |
+| `SquarePairMut` | `mut []` |
+
+  </Accordion>
+  <Accordion title="Operator tokens">
+
+| Value | Text |
+|-------|------|
+| `Plus` | `+` | `Minus` | `-` | `Star` | `*` | `Slash` | `/` | `Percent` | `%` |
+| `Bang` | `!` | `Caret` | `^` | `Ampersand` | `&` | `Pipe` | `\|` |
+| `DoubleAmpersand` | `&&` | `DoublePipe` | `\|\|` |
+| `DoubleGreater` | `>>` | `DoubleLess` | `<<` |
+| `Spaceship` | `<=>` | `Equal` | `=` | `DoubleEqual` | `==` | `BangEqual` | `!=` |
+| `Less` | `<` | `Greater` | `>` | `LessEqual` | `<=` | `GreaterEqual` | `>=` |
+| `PlusEqual` | `+=` | `MinusEqual` | `-=` | `StarEqual` | `*=` | `SlashEqual` | `/=` |
+| `PercentEqual` | `%=` | `AmpersandEqual` | `&=` | `PipeEqual` | `\|=` | `CaretEqual` | `^=` |
+| `DoubleDot` | `..` | `DoubleDotEqual` | `..=` |
+
+  </Accordion>
+  <Accordion title="Keyword tokens">
+
+`if`, `else`, `while`, `for`, `return`, `break`, `continue`, `in`, `inout`, `this`, `pub`, `static`, `mod`, `with`, `as`, `fn`, `alias`, `using`, `module`, `class`, `struct`, `enum`, `enumflag`, `union`, `scheme`, `interface`, `impl`, `operator`, `spawn`, `try`, `mut`, `refmut`, `gcnew`, `view`, `const`, `macro`, `called`, `null`, `true`, `false`
+
+  </Accordion>
+</AccordionGroup>
+
+## What the scanner handles
+
+| Input | Token produced |
+|-------|----------------|
+| `123`, `0xFF`, `0b1010` | `IntegerLiteral` |
+| `3.14`, `1.0e-5` | `RealLiteral` |
+| `"hello"` | `StringLiteral` |
+| `'x'` | `CharLiteral` |
+| `myVar`, `_count` | `Identifier` |
+| Any registered keyword | Corresponding keyword token |
+| `//…` to end of line | Skipped by `NextToken()` |
+| `/* … */` | Skipped by `NextToken()` |
+
+<Note>
+String and character literals may return `std::nullopt` from `NextTokenInternal()` if an unterminated literal is encountered. The parser will record an error via `Parser::error()` in that case.
+</Note>

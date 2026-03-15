@@ -1,0 +1,355 @@
+---
+title: "Linked List"
+description: "A complete linked list implementation in Yoyo demonstrating generics, GC-managed heap allocation, iterator interfaces, and functional-style adapter chaining."
+---
+
+This example builds a singly-linked list from scratch and then layers iterator adapters on top of it. By the end, you can write `a.iter().chain(b.iter()).enumerate()` — a fully lazy, zero-overhead chain of iterators, all defined in pure Yoyo.
+
+**Features demonstrated:**
+- Generic structs with `::<T>` syntax
+- `gcnew` for GC-managed heap allocation
+- Optional types with the `?` suffix
+- `if |val| (expr)` pattern matching on optionals
+- Implementing `core::Iterator` on a custom struct
+- Iterator adapters (`EnumerateIter`, `ChainIter`) as generic structs
+- Constrained generic functions
+- `for (x in iter)` loop syntax
+
+## Complete source
+
+```yoyo linked_list.yoyo
+app: module = APP
+
+Node: struct::<T> = {
+	data: T,
+	next: (^Node::<T>)?
+}
+LinkedList: struct::<T> = {
+	first: (^Node::<T>)?,
+	new: fn -> This = return This{ .first = null };
+	append: fn (&mut this, value: T) = {
+		if |val| (this.first) {
+			last: mut = val;
+			//implement options as truthy values and break
+			should_loop: mut = true;
+			while (should_loop) {
+				if |nxt| (last.next) last = nxt;
+				else should_loop = false;
+			}
+			last.next = gcnew Node::<T>{ .data = value, .next = null };
+		} else {
+			this.first = gcnew Node::<T>{ .data = value, .next = null };
+		}
+	}
+}
+LinkedListIterator: struct:&::<T> impl core::Iterator::<&T> = {
+	curr: (^Node::<T>)?,
+	impl core::Iterator::<&T>
+	{
+		next: fn (&mut this) -> (&T)? = {
+			if |node| (this.curr) {
+				this.curr = node.next;
+				return &node.data;
+			}
+			else return null;
+		}
+	}
+}
+
+EnumerateIter: struct:&::<T, O> impl core::Iterator::<(u64, O)> = {
+	actual_iter: T,
+	idx: u64,
+	impl core::Iterator::<(u64, O)> {
+		next: fn (&mut this) -> (u64, O)? = {
+			if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+				this.idx = this.idx + 1;
+				return (this.idx, nxt);
+			}
+			else return null;
+		}
+	}
+}
+
+ChainIter: struct:&::<A, B, O> impl core::Iterator::<O> = 
+{
+	first_iter: A,
+	second_iter: B,
+	impl core::Iterator::<O> {
+		next: fn (&mut this) -> O? = {
+			if |nxt| (this.first_iter.core::Iterator::<O>::next()) return nxt;
+			else return this.second_iter.core::Iterator::<O>::next();
+		}
+	}		
+}
+iter: fn::<T> (list: &LinkedList::<T>) -> LinkedListIterator::<T>
+	= return LinkedListIterator::<T> { .curr = list.first };
+
+enumerate: fn::<T: impl core::Iterator::<O>, O> (iter: T) ->
+	EnumerateIter::<T, O> = return EnumerateIter::<T, O>{.actual_iter = iter, .idx = 0};
+
+chain: fn::<A: impl core::Iterator::<O>, B: impl core::Iterator::<O>, O> 
+	(first: A, snd: B) -> ChainIter::<A, B, O> = return ChainIter::<A, B, O>{.first_iter = first, .second_iter = snd};
+main: fn = {
+	a: mut = LinkedList::<str>::new();
+	a.append("Hello");
+	a.append("World");
+	a.append("Stuff");
+	a.append("Others");
+	b: mut = LinkedList::<str>::new();
+	b.append("Second List");
+	b.append("Second List Again");
+	for (lol in a.iter().chain(b.iter()).enumerate()) {
+		app::func(&"${lol.0}: ${*lol.1}");
+	}
+}
+```
+
+## Walk-through
+
+<Steps>
+  <Step title="Node struct">
+
+`Node::<T>` is the building block of the list. Each node holds a value of type `T` and an optional GC pointer to the next node:
+
+```yoyo
+Node: struct::<T> = {
+    data: T,
+    next: (^Node::<T>)?
+}
+```
+
+- `struct::<T>` — declares a generic struct parameterised by `T`.
+- `^Node::<T>` — a GC-managed pointer to another node. The `^` sigil means the garbage collector owns and tracks this allocation.
+- `(^Node::<T>)?` — wrapping the pointer type in `(...)?` makes it optional: the field can hold either a pointer or `null`, representing the end of the list.
+
+{/* */}
+  </Step>
+  <Step title="LinkedList struct">
+
+`LinkedList::<T>` owns a pointer to the first node and exposes two methods:
+
+```yoyo
+LinkedList: struct::<T> = {
+    first: (^Node::<T>)?,
+    new: fn -> This = return This{ .first = null };
+    append: fn (&mut this, value: T) = {
+        if |val| (this.first) {
+            last: mut = val;
+            should_loop: mut = true;
+            while (should_loop) {
+                if |nxt| (last.next) last = nxt;
+                else should_loop = false;
+            }
+            last.next = gcnew Node::<T>{ .data = value, .next = null };
+        } else {
+            this.first = gcnew Node::<T>{ .data = value, .next = null };
+        }
+    }
+}
+```
+
+- `new: fn -> This` — a static constructor. `This` refers to the enclosing type, so `LinkedList::<str>::new()` returns a `LinkedList::<str>` with `first` set to `null`.
+- `append: fn (&mut this, value: T)` — takes a mutable reference to `this` so it can modify the list in place.
+- `if |val| (this.first)` — *optional extraction*: if `this.first` is not `null`, bind its value to `val` and enter the `if` branch. The `|val|` syntax is Yoyo's pattern-match shorthand for optionals.
+- Inside the `while` loop, `if |nxt| (last.next)` walks to the last node by repeatedly extracting the `next` pointer until it is `null`.
+- `gcnew Node::<T>{ ... }` — allocates a new `Node` on the GC-managed heap and returns a `^Node::<T>` pointer to it.
+
+{/* */}
+  </Step>
+  <Step title="LinkedListIterator">
+
+`LinkedListIterator` turns the list into a lazy sequence by implementing `core::Iterator::<&T>`:
+
+```yoyo
+LinkedListIterator: struct:&::<T> impl core::Iterator::<&T> = {
+    curr: (^Node::<T>)?,
+    impl core::Iterator::<&T>
+    {
+        next: fn (&mut this) -> (&T)? = {
+            if |node| (this.curr) {
+                this.curr = node.next;
+                return &node.data;
+            }
+            else return null;
+        }
+    }
+}
+```
+
+- `struct:&` — the `:&` modifier marks this struct as a non-owning reference type. It does not own the underlying list nodes.
+- `impl core::Iterator::<&T>` — declares that this struct satisfies the `Iterator` interface with element type `&T` (a reference to `T`).
+- The `impl core::Iterator::<&T> { ... }` block inside the struct body provides the implementation. The single required method is `next`, which returns the next element wrapped in an optional, or `null` when the sequence is exhausted.
+- Each call to `next` extracts the current node, advances `this.curr` to `node.next`, and returns a reference to `node.data`.
+
+{/* */}
+  </Step>
+  <Step title="EnumerateIter adapter">
+
+`EnumerateIter` wraps any iterator and pairs each element with a running index:
+
+```yoyo
+EnumerateIter: struct:&::<T, O> impl core::Iterator::<(u64, O)> = {
+    actual_iter: T,
+    idx: u64,
+    impl core::Iterator::<(u64, O)> {
+        next: fn (&mut this) -> (u64, O)? = {
+            if |nxt| (this.actual_iter.core::Iterator::<O>::next()) {
+                this.idx = this.idx + 1;
+                return (this.idx, nxt);
+            }
+            else return null;
+        }
+    }
+}
+```
+
+- Two type parameters: `T` is the wrapped iterator type; `O` is the element type that `T` yields.
+- The output element type is the tuple `(u64, O)` — an index plus the original element.
+- `this.actual_iter.core::Iterator::<O>::next()` — calls `next` with an explicit interface qualification. This is required because `T` is a generic parameter, so the compiler uses the qualified path to resolve the method unambiguously.
+- When the inner iterator returns `null`, `EnumerateIter` also returns `null`, ending the sequence.
+
+{/* */}
+  </Step>
+  <Step title="ChainIter adapter">
+
+`ChainIter` sequences two iterators of the same output type one after the other:
+
+```yoyo
+ChainIter: struct:&::<A, B, O> impl core::Iterator::<O> = 
+{
+    first_iter: A,
+    second_iter: B,
+    impl core::Iterator::<O> {
+        next: fn (&mut this) -> O? = {
+            if |nxt| (this.first_iter.core::Iterator::<O>::next()) return nxt;
+            else return this.second_iter.core::Iterator::<O>::next();
+        }
+    }
+}
+```
+
+- Three type parameters: `A` and `B` are the two iterator types; `O` is their shared element type.
+- The logic is minimal: try `first_iter` first, and once it is exhausted, fall through to `second_iter`.
+- Both calls use explicit interface dispatch (`core::Iterator::<O>::next()`) for the same reason as `EnumerateIter`.
+
+{/* */}
+  </Step>
+  <Step title="Free adapter functions">
+
+Three free functions serve as ergonomic constructors for the iterator types:
+
+```yoyo
+iter: fn::<T> (list: &LinkedList::<T>) -> LinkedListIterator::<T>
+    = return LinkedListIterator::<T> { .curr = list.first };
+
+enumerate: fn::<T: impl core::Iterator::<O>, O> (iter: T) ->
+    EnumerateIter::<T, O> = return EnumerateIter::<T, O>{.actual_iter = iter, .idx = 0};
+
+chain: fn::<A: impl core::Iterator::<O>, B: impl core::Iterator::<O>, O> 
+    (first: A, snd: B) -> ChainIter::<A, B, O>
+    = return ChainIter::<A, B, O>{.first_iter = first, .second_iter = snd};
+```
+
+- `iter` — borrows a `LinkedList` and returns a `LinkedListIterator` starting at the first node.
+- `enumerate` — constrained with `T: impl core::Iterator::<O>`, ensuring only valid iterators can be passed. Starts the index counter at `0`.
+- `chain` — constrained so that both `A` and `B` must implement `core::Iterator::<O>` for the *same* `O`, guaranteeing the two iterators produce the same element type.
+
+Because these are free functions called as methods via Yoyo's universal function call syntax, you can write `list.iter()` instead of `iter(&list)`.
+
+  </Step>
+  <Step title="main: putting it together">
+
+```yoyo
+main: fn = {
+    a: mut = LinkedList::<str>::new();
+    a.append("Hello");
+    a.append("World");
+    a.append("Stuff");
+    a.append("Others");
+    b: mut = LinkedList::<str>::new();
+    b.append("Second List");
+    b.append("Second List Again");
+    for (lol in a.iter().chain(b.iter()).enumerate()) {
+        app::func(&"${lol.0}: ${*lol.1}");
+    }
+}
+```
+
+- `LinkedList::<str>::new()` — creates an empty list. The type argument `str` is provided explicitly; it could often be inferred from the first `append` call.
+- `a.iter().chain(b.iter()).enumerate()` — constructs the full adapter pipeline without any intermediate allocation. Each method call returns a new adapter struct on the stack.
+- `for (lol in ...)` — the `for` loop calls `next` on the iterator repeatedly until it returns `null`.
+- `lol.0` is the `u64` index; `lol.1` is the `&str` reference yielded by `LinkedListIterator`.
+- `*lol.1` dereferences the reference to obtain the `str` value for interpolation.
+- `"${lol.0}: ${*lol.1}"` — string interpolation using the `${}` syntax.
+
+{/* */}
+  </Step>
+</Steps>
+
+## Key concepts summary
+
+<AccordionGroup>
+  <Accordion title="Generic structs with ::<T>">
+
+Add `::< >` after the struct or function keyword to introduce type parameters:
+
+```yoyo
+Node: struct::<T> = { data: T, next: (^Node::<T>)? }
+```
+
+Instantiate with explicit type arguments when inference is unavailable:
+
+```yoyo
+a: mut = LinkedList::<str>::new();
+```
+  </Accordion>
+  <Accordion title="gcnew and GC pointers">
+
+`gcnew` allocates memory on the GC-managed heap. The result is a `^T` pointer — the runtime tracks it and frees it automatically when no more references exist:
+
+```yoyo
+gcnew Node::<T>{ .data = value, .next = null }
+```
+
+To mark a pointer as optional (nullable), wrap the pointer type in `(...)?`:
+
+```yoyo
+next: (^Node::<T>)?
+```
+  </Accordion>
+  <Accordion title="Optional extraction with if |val|">
+
+The `if |val| (expr)` pattern tests whether an optional has a value and binds it to `val` if so:
+
+```yoyo
+if |node| (this.curr) {
+    // node is ^Node::<T>, guaranteed non-null here
+    this.curr = node.next;
+    return &node.data;
+} else return null;
+```
+
+This is equivalent to a `match Some(val) / None` pattern in other languages.
+  </Accordion>
+  <Accordion title="Interface implementation blocks">
+
+Declare conformance in the struct header with `impl InterfaceName`, then provide the method bodies inside a matching `impl` block within the struct body:
+
+```yoyo
+LinkedListIterator: struct:&::<T> impl core::Iterator::<&T> = {
+    curr: (^Node::<T>)?,
+    impl core::Iterator::<&T> {
+        next: fn (&mut this) -> (&T)? = { ... }
+    }
+}
+```
+  </Accordion>
+  <Accordion title="Explicit interface method dispatch">
+
+When calling an interface method on a generic type parameter, qualify the call with the full interface path to resolve it unambiguously:
+
+```yoyo
+this.actual_iter.core::Iterator::<O>::next()
+```
+  </Accordion>
+</AccordionGroup>

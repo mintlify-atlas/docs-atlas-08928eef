@@ -1,0 +1,225 @@
+---
+title: "Engine setup"
+description: "Create a Yoyo engine, load source modules, compile, and execute."
+---
+
+The engine is the root object you create in your host application. It owns all modules, the compiler pipeline, and the cooperative runtime. This page covers the full engine lifecycle from construction to execution.
+
+## Choosing a backend
+
+<Tabs>
+  <Tab title="YVM">
+    `YVMEngine` is the recommended choice for embedding. It requires no LLVM installation and produces fast-starting bytecode.
+
+    ```cpp
+    #include <yvm/yvm_engine.h>
+    #include <yvm/app_module.h>
+
+    Yoyo::YVMEngine engine;
+    ```
+  </Tab>
+  <Tab title="LLVM">
+    `LLVMEngine` compiles to native machine code via LLVM ORC JIT. Use it when compute-intensive scripts need maximum throughput.
+
+    ```cpp
+    #include <llvm/llvm_engine.h>
+    #include <llvm/app_module.h>
+
+    Yoyo::LLVMEngine engine;
+    ```
+
+    <Warning>
+      Building the LLVM backend requires LLVM to be present on the system. Pass `-Dexecutor=llvm` to Meson when configuring the Yoyo build.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Engine lifecycle
+
+```
+construct  →  configure  →  compile  →  prepareForExecution  →  execute
+```
+
+Each phase is a separate method call. The order is strict: you must not call `compile()` before all modules and app modules have been added, and you must not call `execute()` before `prepareForExecution()`.
+
+### 1. Add app modules
+
+Before adding source modules, create the app modules that expose C++ APIs to scripts. App modules must be registered before `compile()` because the compiler resolves function calls at compile time.
+
+```cpp
+auto app = engine.addAppModule("test");
+app->addFunction("(x: &str) -> i32", my_print, "print");
+```
+
+See [App modules](/embedding/app-modules) for the full API.
+
+### 2. Add source modules
+
+Pass Yoyo source code as a `std::string`. The module name is used by other modules to import symbols.
+
+```cpp
+std::string source = R"(
+main: fn = {
+    test::print(&"hello");
+}
+)";
+
+ModuleBase* mod = engine.addModule("main", source);
+```
+
+`addModule()` returns a `ModuleBase*` that you can hold onto for later use with `findFunction()`.
+
+<Note>
+  On `YVMEngine`, `addModule()` returns `ModuleBase*`. On `LLVMEngine`, the return type is `void`. Keep the pointer when you need to look up functions after compilation.
+</Note>
+
+### 3. Load external libraries (optional)
+
+Both backends support loading native shared libraries whose symbols will be available to scripts.
+
+<CodeGroup>
+
+```cpp YVMEngine
+engine.addDynamicLibrary("c_file.dll");
+```
+
+```cpp LLVMEngine
+engine.addDynamicLibrary("c_file.dll");
+engine.addStaticLibrary("/path/to/libfoo.a"); // LLVM only
+```
+
+</CodeGroup>
+
+### 4. Compile
+
+Compile all registered modules in one pass.
+
+<Tabs>
+  <Tab title="YVM">
+    `compile()` returns `bool`. A `false` return means compilation failed.
+
+    ```cpp
+    if (!engine.compile()) {
+        // Inspect errors — currently printed to stderr
+        return 1;
+    }
+    ```
+  </Tab>
+  <Tab title="LLVM">
+    `compile()` returns `void`. Errors are currently reported via LLVM diagnostics.
+
+    ```cpp
+    engine.compile();
+    ```
+  </Tab>
+</Tabs>
+
+### 5. Prepare for execution
+
+`prepareForExecution()` finalises the compiled output — linking, patching call sites, and setting up the runtime scheduler — before any fibers are created.
+
+```cpp
+engine.prepareForExecution();
+```
+
+### 6. Create fibers and execute
+
+Locate the compiled entry-point function, create a `Fiber`, and run the scheduler.
+
+```cpp
+auto fn  = engine.findFunction(mod, "main::main").value();
+auto fib = engine.createFiber(fn);
+engine.execute();
+```
+
+`execute()` runs until all fibers have completed. It is defined on the base `Engine` class and delegates to the `Runtime`.
+
+See [Calling Yoyo functions](/embedding/calling-functions) for how to pass arguments and read return values.
+
+## Complete example
+
+The following example mirrors the pattern used in the test suite (`ir_gen_test.cpp`):
+
+```cpp
+#include <iostream>
+#include <string_view>
+#include <string>
+
+#include <engine.h>
+#include <yvm/yvm_engine.h>
+#include <yvm/app_module.h>
+
+int32_t my_print(void* arg)
+{
+    std::string_view sv = Yoyo::Engine::viewString(arg);
+    std::cout << sv << '\n';
+    return 0;
+}
+
+void my_assert(bool cond, void* msg)
+{
+    if (!cond) {
+        std::cerr << "assertion failed: "
+                  << Yoyo::Engine::viewString(msg) << '\n';
+    }
+}
+
+int main()
+{
+    std::string source = R"(
+main: fn = {
+    test::assert(1 == 1, &"1 == 1");
+    test::print(&"all checks passed");
+}
+)";
+
+    Yoyo::YVMEngine engine;
+
+    // Register C++ functions
+    auto app = engine.addAppModule("test");
+    app->addFunction("(x: &str) -> i32",          my_print,  "print");
+    app->addFunction("(x: bool, y: &str) -> void", my_assert, "assert");
+
+    // Load Yoyo source
+    auto* mod = engine.addModule("main", source);
+
+    // Compile and run
+    if (!engine.compile()) return 1;
+    engine.prepareForExecution();
+
+    auto fn  = engine.findFunction(mod, "main::main").value();
+    auto fib = engine.createFiber(fn);
+    engine.execute();
+}
+```
+
+## Engine API summary
+
+### `YVMEngine`
+
+| Method | Return type | Description |
+|---|---|---|
+| `addAppModule(name)` | `YVMAppModule*` | Create a C++ app module. |
+| `addModule(name, source)` | `ModuleBase*` | Parse and register a Yoyo source module. |
+| `addDynamicLibrary(path)` | `void` | Load a native shared library. |
+| `compile()` | `bool` | Run the full compilation pipeline. |
+| `prepareForExecution()` | `void` | Finalise and link compiled code. |
+| `findFunction(mod, name)` | `std::optional<FunctionTy>` | Look up a compiled function by module and mangled name. |
+| `createFiber(fn)` | `Fiber` | Wrap a compiled function in a schedulable coroutine. |
+| `execute()` | `void` | Run all queued fibers to completion. |
+
+### `LLVMEngine`
+
+| Method | Return type | Description |
+|---|---|---|
+| `addAppModule(name)` | `LLVMAppModule*` | Create a C++ app module. |
+| `addModule(name, source)` | `void` | Parse and register a Yoyo source module. |
+| `addDynamicLibrary(path)` | `void` | Load a native shared library. |
+| `addStaticLibrary(path)` | `void` | Link a static archive. |
+| `compile()` | `void` | Run the full compilation pipeline. |
+| `prepareForExecution()` | `void` | Finalise and link compiled code. |
+| `execute()` | `void` | Run all queued fibers to completion. |
+
+<Tip>
+  The `execute()` method and the `sleep()` helper are defined on the base `Engine` class and are available to both backends.
+</Tip>

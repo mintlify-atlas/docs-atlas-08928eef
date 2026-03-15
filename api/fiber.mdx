@@ -1,0 +1,155 @@
+---
+title: "Fiber"
+description: "RAII wrapper for a scheduled Yoyo coroutine. Holds parameter storage and the return value, and releases the underlying coroutine on destruction."
+keywords: ["Fiber", "coroutine", "get", "forget", "createFiber", "RAII"]
+---
+
+`Yoyo::Fiber` is a lightweight RAII handle for a single Yoyo coroutine invocation. It bundles together the raw parameter buffer, the return-value buffer, the underlying `mco_coro*` handle, and a pointer to the `Runtime` so that cleanup happens automatically.
+
+You obtain a `Fiber` by calling `YVMEngine::createFiber(fn)` after looking up a function with `YVMEngine::findFunction`.
+
+## Class definition
+
+```cpp
+namespace Yoyo {
+    struct Fiber {
+        void*     parameters;
+        void*     return_val;
+        mco_coro* coro;
+        Runtime*  rt;
+
+        Fiber(void* param, void* ret_val, mco_coro* coro, Runtime* rt);
+        Fiber(const Fiber&) = delete;
+
+        template<typename T>
+        T get();
+
+        void forget();
+
+        ~Fiber();
+    };
+}
+```
+
+## Constructor
+
+```cpp
+Fiber(void* param, void* ret_val, mco_coro* coro, Runtime* rt);
+```
+
+Direct construction is reserved for engine internals. Use `YVMEngine::createFiber(fn)` from application code.
+
+<ParamField path="param" type="void*" required>
+  Pointer to the argument data buffer. Write your function arguments here immediately after receiving the `Fiber`, before calling `Engine::execute()`.
+</ParamField>
+
+<ParamField path="ret_val" type="void*" required>
+  Pointer to the return-value buffer. After `execute()` returns, this buffer holds the function's return value. Read it via `get<T>()`.
+</ParamField>
+
+<ParamField path="coro" type="mco_coro*" required>
+  The raw minicoro coroutine handle. The `Fiber` owns this handle and will release it on destruction.
+</ParamField>
+
+<ParamField path="rt" type="Runtime*" required>
+  Non-owning pointer to the `Runtime` scheduler. Used by `forget()` and the destructor to call `Runtime::release_job`.
+</ParamField>
+
+## Members
+
+### `parameters`
+
+```cpp
+void* parameters;
+```
+
+Raw pointer to the argument buffer for this invocation. Write the function's arguments into this buffer before calling `Engine::execute()`. The layout is the same as the ABI-level parameter list described by the `FunctionTy` struct.
+
+### `return_val`
+
+```cpp
+void* return_val;
+```
+
+Raw pointer to the return-value buffer. After `Engine::execute()` has returned, this buffer contains the function's result. Prefer the typed `get<T>()` accessor over reading this pointer directly.
+
+## Methods
+
+### `get<T>()`
+
+```cpp
+template<typename T>
+T get();
+```
+
+Moves the return value out of the buffer as type `T`, calls `forget()` to release the underlying coroutine, and returns the value.
+
+<Warning>
+Call `get<T>()` only **after** `Engine::execute()` has returned. The return buffer is not populated until the coroutine has completed.
+</Warning>
+
+Calling `get<T>()` a second time is undefined behaviour because the coroutine has already been released.
+
+### `forget()`
+
+```cpp
+void forget();
+```
+
+Releases the underlying coroutine without reading the return value. After `forget()` the `coro` member is set to `nullptr` and the destructor becomes a no-op.
+
+Use `forget()` when the return value is not needed, or when you have already consumed it by a means other than `get<T>()`.
+
+## Destructor
+
+```cpp
+~Fiber();
+```
+
+If `coro` is not `nullptr` (i.e. `get<T>()` or `forget()` has not yet been called), the destructor calls `rt->release_job(coro)` to clean up the coroutine. This ensures that every fiber is released even if the host code exits early via an exception.
+
+## Non-copyable design
+
+`Fiber` is non-copyable (copy constructor is `= delete`) because it has sole ownership of the coroutine handle. It can be moved implicitly since moving a pointer-only struct is safe.
+
+## Usage pattern
+
+```cpp
+#include <yoyo/yvm/yvm_engine.h>
+#include <cstring>
+#include <cassert>
+#include <iostream>
+
+int main() {
+    Yoyo::YVMEngine engine;
+    engine.addModule("calc", R"(
+        pub fn multiply(a: i32, b: i32): i32 { return a * b; }
+    )");
+    engine.compile();
+    engine.prepareForExecution();
+
+    // 1. Look up the function
+    auto* mod = engine.modules.at("calc").get();
+    auto fn_opt = engine.findFunction(mod, "multiply");
+    assert(fn_opt.has_value());
+
+    // 2. Create a fiber and write parameters
+    Yoyo::Fiber fiber = engine.createFiber(*fn_opt);
+    int32_t a = 6, b = 7;
+    std::memcpy(fiber.parameters, &a, sizeof(a));
+    std::memcpy(reinterpret_cast<char*>(fiber.parameters) + sizeof(a),
+                &b, sizeof(b));
+
+    // 3. Run the scheduler
+    engine.execute();
+
+    // 4. Read the return value and release the fiber
+    int32_t result = fiber.get<int32_t>();
+    std::cout << "6 * 7 = " << result << '\n'; // 42
+    // fiber is now released; destructor is a no-op
+}
+```
+
+<Note>
+Parameter layout in the buffer follows the function's ABI as described by `FunctionTy::params`. For simple scalar types, arguments are packed consecutively in declaration order.
+</Note>

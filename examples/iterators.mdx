@@ -1,0 +1,278 @@
+---
+title: "Iterators"
+description: "Implement the Iterator interface on a generic linked list in Yoyo, covering class vs struct, mutable GC pointers, type aliases in interfaces, stored closures, and for-in loops."
+---
+
+This example shows how to implement the `Iterator` interface on a generic linked list, providing both read-only and mutable iteration. It also demonstrates the `class` keyword, `stored` closures, and the `for (elem in iterator)` loop.
+
+**Features demonstrated:**
+- `class` vs `struct` (class carries GC ownership)
+- `^mut T` — mutable GC pointer
+- Interface method blocks inside a struct body
+- Type aliases in interfaces (`ElementTy: alias = &T`)
+- `stored` closures / lambdas
+- `for (elem in iterator)` loop syntax
+- Mutable iteration with `*elem = *elem + 100`
+- `from_array` constructor pattern
+
+## Complete source
+
+```yoyo iterator.yoyo
+Node: struct::<T> = {
+    value: T,
+    next: (^mut Node::<T>)?
+}
+
+List: class::<T> = {
+    first: (^mut Node::<T>)?
+    iter: fn (&this) -> ListIter::<T> = return ListIter::<T>::new(this.first.value());
+    iter_mut: fn (&mut this) -> ListIterMut = return ListIterMut::<T>::new(this.first.value());
+    from_array: fn (arr: mut [T]) -> This = {
+        list: This = This{ .first = null };
+        if (arr.size() >= 1) {
+            list.first = new Node::<T>{ .value = arr.extract(0), .next = null }
+        }
+        current: ^mut Node::<T> = list.first.value();
+        while (arr.size()) {
+            next := new Node::<T>{ .value = arr.extract(0), .next = null };
+            current.next = next;
+            current = next;
+        }
+        return list;
+    }
+}
+
+ListIter: struct::<T> impl Iterator = {
+    node: ^Node::<T>
+    new: fn (node: ^Node::<T>) -> This = return This{ node };
+
+    Iterator {
+        ElementTy: alias = &T;
+        is_end: fn (&this) -> bool = return this.node.next.has_value();
+        advance: fn (&mut this) = if (this.node.next) this.node = *this.node.next.value();
+        value: fn -> ElementTy = return &node.value;
+    }
+}
+ListIterMut: struct::<T> impl Iterator = {
+    node: ^mut Node::<T>
+    new: fn (node: ^mut Node::<T>) -> This = return This{ node };
+    Iterator {
+        ElementTy: alias = &mut T;
+        is_end: fn (&this) -> bool = return this.node.next.has_value();
+        advance: fn (&mut this) = if (this.node.next) this.node = *this.node.next.value();
+        value: fn -> ElementTy = return &node.value;
+    }
+}
+//prints 10 20 30 40 50 110 120 130 140 150 on different lines
+main: fn = {
+    list := List::<i32>::from_array([10, 20, 30, 40, 50]);
+    print_list: stored = ||(list: &List) for (elem in list.iter()) std::println("${*elem}");
+    print_list(&list);
+    for (elem in iter_mut) {
+        *elem = *elem + 100;
+    }
+    print_list(&list);
+}
+```
+
+## Walk-through
+
+<Steps>
+  <Step title="Node struct">
+
+```yoyo
+Node: struct::<T> = {
+    value: T,
+    next: (^mut Node::<T>)?
+}
+```
+
+- `value: T` — the stored element.
+- `next: (^mut Node::<T>)?` — an optional mutable GC pointer to the next node. `^mut T` differs from `^T`: a `^mut T` pointer allows mutating the pointed-to value, whereas `^T` is a read-only GC pointer. Wrapping in `(...)?` makes the field nullable, representing the end of the list with `null`.
+
+{/* */}
+  </Step>
+  <Step title="List class">
+
+```yoyo
+List: class::<T> = {
+    first: (^mut Node::<T>)?
+    iter: fn (&this) -> ListIter::<T> = ...
+    iter_mut: fn (&mut this) -> ListIterMut = ...
+    from_array: fn (arr: mut [T]) -> This = { ... }
+}
+```
+
+`class` is the GC-owning counterpart to `struct`. Whereas a struct can live on the stack or be embedded in another type, a class is always heap-allocated and managed by the garbage collector.
+
+- `iter` — takes a shared reference; returns a read-only iterator.
+- `iter_mut` — takes a mutable reference; returns a mutable iterator.
+- `from_array` — a static constructor that consumes an array and builds the linked list.
+
+<Note>
+`class` vs `struct`: use `struct` for value types and stack-compatible data. Use `class` when you need a GC-managed object with a stable heap address (for example, when the object will be shared via `^` pointers across multiple owners).
+</Note>
+
+  </Step>
+  <Step title="from_array constructor">
+
+```yoyo
+from_array: fn (arr: mut [T]) -> This = {
+    list: This = This{ .first = null };
+    if (arr.size() >= 1) {
+        list.first = new Node::<T>{ .value = arr.extract(0), .next = null }
+    }
+    current: ^mut Node::<T> = list.first.value();
+    while (arr.size()) {
+        next := new Node::<T>{ .value = arr.extract(0), .next = null };
+        current.next = next;
+        current = next;
+    }
+    return list;
+}
+```
+
+- `arr: mut [T]` — takes ownership of a mutable array. The array is consumed element by element.
+- `arr.extract(0)` — removes and returns the element at index `0`, shrinking the array. The `while (arr.size())` loop continues until the array is empty.
+- `new Node::<T>{ ... }` — allocates a new node on the GC heap (note: `new` without `gc` prefix inside a `class` context; semantics may differ from `gcnew` in module-level code).
+- `current: ^mut Node::<T>` — a mutable GC pointer used to walk the tail of the list while appending.
+
+{/* */}
+  </Step>
+  <Step title="ListIter and the Iterator interface">
+
+```yoyo
+ListIter: struct::<T> impl Iterator = {
+    node: ^Node::<T>
+    new: fn (node: ^Node::<T>) -> This = return This{ node };
+
+    Iterator {
+        ElementTy: alias = &T;
+        is_end: fn (&this) -> bool = return this.node.next.has_value();
+        advance: fn (&mut this) = if (this.node.next) this.node = *this.node.next.value();
+        value: fn -> ElementTy = return &node.value;
+    }
+}
+```
+
+The `Iterator` interface contract requires four items:
+
+| Member | Purpose |
+|---|---|
+| `ElementTy: alias` | Type alias naming the element type the iterator yields |
+| `is_end: fn (&this) -> bool` | Returns `true` when the iterator is exhausted |
+| `advance: fn (&mut this)` | Moves the iterator to the next element |
+| `value: fn -> ElementTy` | Returns the current element |
+
+- `ElementTy: alias = &T` — declares a type alias inside the interface block. Using `alias` here means `ElementTy` is a first-class name that other code (and the `for` loop desugaring) can refer to.
+- `is_end` checks whether `next` has a value — when `next` is `null`, the iterator is at the end.
+- `advance` dereferences and unwraps `next.value()` to move `this.node` forward.
+- `value` returns a reference `&T` to the current node's value.
+
+<Note>
+The `Iterator` interface in this file uses a different contract (`ElementTy`, `is_end`, `advance`, `value`) than the `core::Iterator` used in the linked list example (`next` returning `T?`). These are two different interface designs; the bikeshed file explores a cursor-style iterator as an alternative.
+</Note>
+
+  </Step>
+  <Step title="ListIterMut: mutable iteration">
+
+```yoyo
+ListIterMut: struct::<T> impl Iterator = {
+    node: ^mut Node::<T>
+    new: fn (node: ^mut Node::<T>) -> This = return This{ node };
+    Iterator {
+        ElementTy: alias = &mut T;
+        is_end: fn (&this) -> bool = return this.node.next.has_value();
+        advance: fn (&mut this) = if (this.node.next) this.node = *this.node.next.value();
+        value: fn -> ElementTy = return &node.value;
+    }
+}
+```
+
+`ListIterMut` is structurally identical to `ListIter` with two differences:
+
+- `node: ^mut Node::<T>` — holds a *mutable* GC pointer, allowing the iterator to provide write access to the nodes.
+- `ElementTy: alias = &mut T` — the yielded element is a mutable reference. The caller can write through it.
+
+This separation of read and mutable iterators into distinct types is a Yoyo pattern: the type system enforces whether iteration is read-only or write-capable at compile time.
+
+  </Step>
+  <Step title="main: from_array, stored closures, and mutation">
+
+```yoyo
+main: fn = {
+    list := List::<i32>::from_array([10, 20, 30, 40, 50]);
+    print_list: stored = ||(list: &List) for (elem in list.iter()) std::println("${*elem}");
+    print_list(&list);
+    for (elem in iter_mut) {
+        *elem = *elem + 100;
+    }
+    print_list(&list);
+}
+```
+
+- `list := List::<i32>::from_array([10, 20, 30, 40, 50])` — constructs the list from an array literal. The array literal `[10, 20, 30, 40, 50]` is a `[i32; 5]` that `from_array` consumes.
+- `print_list: stored = ||(list: &List) for (...) ...` — declares a stored closure. The `stored` keyword means this closure can be stored in a variable and called multiple times (as opposed to a one-shot or escaping closure). The `||` introduces the capture list (empty here); `(list: &List)` are the closure parameters.
+- `for (elem in list.iter())` — the `for-in` loop desugars into calls to `is_end`, `value`, and `advance` on the iterator. `elem` is bound to `ElementTy`, which is `&i32`, so `*elem` dereferences it.
+- `for (elem in iter_mut)` — iterates mutably. `elem` is `&mut i32`.
+- `*elem = *elem + 100` — dereferences the mutable reference to read the value, adds `100`, and writes it back. After this loop, the list contains `[110, 120, 130, 140, 150]`.
+- Calling `print_list(&list)` a second time confirms the mutation took effect.
+
+{/* */}
+  </Step>
+</Steps>
+
+## Key concepts summary
+
+<AccordionGroup>
+  <Accordion title="class vs struct">
+
+```yoyo
+MyStruct: struct = { ... }   // stack-compatible value type
+MyClass: class = { ... }     // GC-managed heap object
+```
+
+Use `struct` for plain data and value semantics. Use `class` when the object must live on the GC heap with a stable address — typically when multiple parts of the program hold `^` pointers to the same instance.
+  </Accordion>
+  <Accordion title="^T vs ^mut T">
+
+```yoyo
+node: ^Node::<T>       // read-only GC pointer
+node: ^mut Node::<T>   // mutable GC pointer
+```
+
+`^T` grants read access to the pointed-to value; `^mut T` grants write access. Choose `^mut T` when the iterator or container needs to modify the nodes it points to.
+  </Accordion>
+  <Accordion title="Type aliases in interface blocks">
+
+```yoyo
+Iterator {
+    ElementTy: alias = &T;  // read-only element
+    // or
+    ElementTy: alias = &mut T;  // mutable element
+    value: fn -> ElementTy = ...;
+}
+```
+
+Declaring `ElementTy` as an `alias` inside the interface block makes it a named, reusable type. The `for-in` loop and any code consuming the iterator can refer to `ElementTy` without repeating the concrete type.
+  </Accordion>
+  <Accordion title="stored closures">
+
+```yoyo
+print_list: stored = ||(list: &List) for (elem in list.iter()) std::println("${*elem}");
+print_list(&list);
+```
+
+The `stored` keyword marks a closure that can be stored in a variable and invoked multiple times. The `||` prefix introduces the capture clause; parameters follow in parentheses.
+  </Accordion>
+  <Accordion title="for-in loop">
+
+```yoyo
+for (elem in list.iter()) {
+    std::println("${*elem}");
+}
+```
+
+The `for-in` loop works with any value that implements the `Iterator` interface. The loop desugars into repeated calls to `is_end`, `value`, and `advance`. The element type is determined by the `ElementTy` alias.
+  </Accordion>
+</AccordionGroup>

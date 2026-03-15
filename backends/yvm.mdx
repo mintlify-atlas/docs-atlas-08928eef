@@ -1,0 +1,314 @@
+---
+title: "YVM backend"
+description: "Custom bytecode virtual machine with libffi for native calls."
+---
+
+The YVM backend compiles Yoyo source into a custom bytecode format and runs it on an embedded stack-based virtual machine (`Yvm::VM`). Native C++ calls are dispatched through [libffi](https://sourceware.org/libffi/), which removes the need to hand-write platform-specific call stubs for every registered function.
+
+YVM is the default backend and the recommended choice for embedding Yoyo in a C++ application.
+
+## Building with YVM
+
+<Steps>
+  <Step title="Configure the build">
+    Pass `-Dexecutor=yvm` (or omit it — `yvm` is the default) when running `meson setup`.
+
+    ```bash
+    meson setup build -Dexecutor=yvm
+    meson compile -C build
+    ```
+
+    Meson automatically fetches the `yoyo-vm` subproject and resolves `libffi` as a system dependency.
+  </Step>
+
+  <Step title="Include the headers">
+    ```cpp
+    #include <yvm/yvm_engine.h>
+    #include <yvm/app_module.h>
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The YVM backend depends on two additional libraries compared to the frontend-only build: the `yoyo-vm` subproject (fetched automatically by Meson) and `libffi` (must be available on the system).
+</Note>
+
+## `YVMEngine`
+
+`YVMEngine` is the top-level object for the YVM backend. It inherits from the abstract `Engine` base class and adds YVM-specific methods on top of the shared lifecycle API.
+
+```cpp
+class YVMEngine : public Engine {
+public:
+    YVMEngine();
+    ~YVMEngine() override;
+
+    YVMAppModule*             addAppModule(const std::string& name);
+    ModuleBase*               addModule(const std::string& module_name, std::string source);
+    bool                      compile();
+    void                      prepareForExecution();
+    void                      addDynamicLibrary(std::string_view path);
+    Fiber                     createFiber(const FunctionTy& fn);
+    std::optional<FunctionTy> findFunction(ModuleBase* mod, const std::string& function_name);
+    void*                     createGlobalConstant(const Type& type, const std::vector<Constant>& args, IRGenerator*);
+    void*                     findNativeFunction(const std::string& name);
+    size_t                    getTypeSpawnIdx(const Type& tp);
+
+    Yvm::VM              vm;
+    StructTypeSelector   struct_manager;
+    UniqueFISelector     fi_manager;
+    UnionTypeSelector    union_manager;
+    ArrayTypeSelector    array_manager;
+};
+```
+
+### Method reference
+
+| Method | Return type | Description |
+|---|---|---|
+| `addAppModule(name)` | `YVMAppModule*` | Creates a named C++ app module. Must be called before `compile()`. |
+| `addModule(module_name, source)` | `ModuleBase*` | Parses and registers a Yoyo source module. Returns a pointer you can pass to `findFunction()` later. |
+| `compile()` | `bool` | Runs the full pipeline: parsing, type checking, borrow checking, and YVM IR generation. Returns `false` on any error. |
+| `prepareForExecution()` | `void` | Links and patches all compiled code. Must be called after `compile()` and before `createFiber()`. |
+| `addDynamicLibrary(path)` | `void` | Loads a native shared library. Its symbols become available to scripts via C import declarations. |
+| `createFiber(fn)` | `Fiber` | Wraps a compiled function descriptor in a schedulable coroutine. |
+| `findFunction(mod, function_name)` | `std::optional<FunctionTy>` | Looks up a compiled function by its module pointer and mangled name. Returns `std::nullopt` if not found. |
+| `createGlobalConstant(type, args, irgen)` | `void*` | Allocates and initialises a global constant value. Called internally by the IR generator. |
+| `findNativeFunction(name)` | `void*` | Resolves a symbol by name across all loaded native libraries. |
+| `getTypeSpawnIdx(type)` | `size_t` | Returns the spawn index for a given Yoyo type; used by the runtime to track GC-managed objects. |
+
+### Public data members
+
+| Member | Type | Description |
+|---|---|---|
+| `vm` | `Yvm::VM` | The bytecode virtual machine instance. Owns the heap, stack, and instruction dispatch loop. |
+| `struct_manager` | `StructTypeSelector` | Deduplicates `ffi_type` descriptors for struct layouts. |
+| `fi_manager` | `UniqueFISelector` | Deduplicates `ffi_cif` call prototypes (function interface descriptors) shared across call sites. |
+| `union_manager` | `UnionTypeSelector` | Deduplicates `ffi_type` descriptors for union layouts. |
+| `array_manager` | `ArrayTypeSelector` | Deduplicates `ffi_type` descriptors for array layouts. |
+
+## `FunctionTy`
+
+`findFunction()` returns a `FunctionTy` descriptor when a function is found. Pass it directly to `createFiber()`.
+
+```cpp
+struct FunctionTy {
+    uint64_t*      code;         // Pointer into the compiled bytecode stream
+    StructNativeTy* params;      // libffi type descriptor for the parameter list
+    NativeTy*      ret;          // libffi type descriptor for the return type
+    bool           should_sret;  // True when the return value is passed as a hidden first pointer
+};
+```
+
+`should_sret` follows the System V and MSVC ABI rule for structs that are too large to fit in a register: the caller allocates space for the return value and passes a pointer as the first argument.
+
+## `YVMAppModule`
+
+`YVMAppModule` is the bridge between C++ and Yoyo scripts. It inherits from `YVMModule` and adds three registration methods.
+
+### `addFunction`
+
+```cpp
+template<typename R, typename... Args>
+Result addFunction(
+    std::string sig_str,   // Yoyo signature, e.g. "(x: &str) -> i32"
+    R(*func)(Args...),     // C++ function pointer
+    std::string name       // Name scripts will call
+);
+```
+
+The template verifies at compile time that the number of C++ arguments matches the parsed Yoyo signature (accounting for `sret` parameters). At runtime, the method parses the signature string, validates it, and registers the function.
+
+Possible `Result` values:
+
+| Value | Meaning |
+|---|---|
+| `Success` | Registration succeeded. |
+| `NullParameter` | `func` was `nullptr`. |
+| `InvalidSignature` | `sig_str` could not be parsed. |
+| `ParameterCountMismatch` | The number of C++ parameters does not match the signature. |
+| `ReturnTypeMismatch` | `R` is not `void` for an `sret` return type. |
+| `ParameterTypeMismatch` | A parameter type is incompatible. |
+
+### `addEnum`
+
+```cpp
+Result addEnum(
+    std::string enum_name,
+    std::unordered_map<std::string, int32_t> values
+);
+```
+
+Exposes a C++ enum to scripts under `module_name::enum_name::variant`.
+
+### `addClass`
+
+```cpp
+Result addClass(
+    std::string class_name,
+    std::vector<ClassVariable> variables,
+    Ownership sh,
+    std::string block_hash
+);
+```
+
+Registers a C++ struct layout as a Yoyo class type. The `Ownership` parameter controls whether the type is treated as a value type (`struct`) or a reference-counted class.
+
+## Type management
+
+The YVM backend uses libffi for all native calls. libffi requires each type to be described by an `ffi_type` at the call site. To avoid duplicating descriptors for the same layout, `YVMEngine` holds four deduplication managers:
+
+### `StructTypeSelector`
+
+Builds and caches `StructNativeTy` (a `ffi_type` with field offsets) for each unique sequence of field types.
+
+```cpp
+NativeTy* get_struct_type(std::span<NativeTy* const> fields);
+```
+
+### `UniqueFISelector`
+
+Builds and caches `NativeProto` (`ffi_cif`) call descriptors keyed on the parameter type list and return type. All call sites with the same signature share one `ffi_cif`.
+
+```cpp
+NativeProto* get_proto(std::span<NativeTy*> param_types, NativeTy* ret);
+```
+
+### `UnionTypeSelector`
+
+Caches `UnionNativeTy` descriptors for union variants. Unlike structs, the cache key is an unordered set of member types because union layout depends only on the largest member.
+
+```cpp
+NativeTy* get_union_type(std::span<NativeTy* const> variants);
+```
+
+### `ArrayTypeSelector`
+
+Caches `ArrayNativeTy` descriptors keyed on `(element_type, length)` pairs.
+
+```cpp
+NativeTy* get_array_type(NativeTy* element_type, size_t length);
+```
+
+## Native types
+
+The `NativeType` namespace provides factory functions that return libffi primitive type descriptors:
+
+```cpp
+NativeTy* getI8();   NativeTy* getU8();
+NativeTy* getI16();  NativeTy* getU16();
+NativeTy* getI32();  NativeTy* getU32();
+NativeTy* getI64();  NativeTy* getU64();
+NativeTy* getF32();  NativeTy* getF64();
+NativeTy* getPtrTy();
+NativeTy* getVoid();
+```
+
+The `doCall` function invokes a native function through a cached `NativeProto`:
+
+```cpp
+Yvm::VM::Type doCall(
+    NativeProto* proto,
+    size_t nargs,
+    Yvm::VM::Type* args,
+    void* function
+);
+```
+
+## Platform-specific native module
+
+Loading and resolving symbols from shared libraries requires platform-specific code. The YVM build selects the correct implementation automatically:
+
+- **Windows**: `src/yoyo/yvm/windows_native_module.cpp`  
+- **Unix / Linux / macOS**: `src/yoyo/yvm/unix_native_module.cpp`
+
+Both implement the same three functions exposed through `NativeType`:
+
+```cpp
+NativeModule* load_native_library(const std::string& lib_name);
+void*         get_library_fn(NativeModule* module, const std::string& fn_name);
+void          free_native_library(NativeModule*);
+```
+
+You interact with these indirectly through `engine.addDynamicLibrary(path)`, which calls `load_native_library` and stores the result in `YVMEngine::external_dlls`.
+
+## Complete example
+
+The following example is drawn from `tests/ir_gen_test.cpp` and shows the full YVM embedding workflow.
+
+```cpp
+#include <iostream>
+#include <string_view>
+
+#include <yvm/yvm_engine.h>
+#include <yvm/app_module.h>
+#include <engine.h>
+
+// C++ functions exposed to scripts
+int32_t my_print(void* arg)
+{
+    std::string_view sv = Yoyo::Engine::viewString(arg);
+    std::cout << sv << '\n';
+    return 0;
+}
+
+void my_assert(bool cond, void* msg)
+{
+    if (!cond)
+        std::cerr << "assertion failed: " << Yoyo::Engine::viewString(msg) << '\n';
+}
+
+int main()
+{
+    std::string source = R"(
+main: fn = {
+    val := 42;
+    test::assert(val == 42, &"val == 42");
+    test::print(&"all checks passed");
+})"; 
+
+    Yoyo::YVMEngine engine;
+
+    // 1. Register C++ functions in an app module
+    auto* app = engine.addAppModule("test");
+    app->addFunction("(x: &str) -> i32",          my_print,  "print");
+    app->addFunction("(x: bool, y: &str) -> void", my_assert, "assert");
+
+    // 2. Load Yoyo source
+    auto* mod = engine.addModule("main", source);
+
+    // 3. Compile
+    if (!engine.compile()) return 1;
+
+    // 4. Prepare for execution
+    engine.prepareForExecution();
+
+    // 5. Look up the entry point and run
+    auto fn  = engine.findFunction(mod, "main::main").value();
+    auto fib = engine.createFiber(fn);
+    engine.execute();
+}
+```
+
+### Passing arguments to a function
+
+When a Yoyo function takes parameters, write them directly into `fib.parameters` before calling `execute()`:
+
+```cpp
+// Yoyo: main: fn(inp: i32) = { ... }
+auto fn  = engine.findFunction(mod, "source::main").value();
+auto fib = engine.createFiber(fn);
+*(int32_t*)fib.parameters = 7;   // first argument
+engine.execute();
+```
+
+### Dumping bytecode IR
+
+For debugging, `YVMModule::dumpIR()` returns the bytecode disassembly as a string:
+
+```cpp
+for (auto& [name, mod] : engine.modules) {
+    auto* yvm_mod = reinterpret_cast<Yoyo::YVMModule*>(mod.get());
+    std::cout << yvm_mod->dumpIR() << '\n';
+}
+```

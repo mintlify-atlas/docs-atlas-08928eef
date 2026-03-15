@@ -1,0 +1,357 @@
+---
+title: "Tic Tac Toe"
+description: "A playable Tic Tac Toe game in Yoyo, demonstrating enums, static arrays, struct methods, string interpolation, and optional return types."
+---
+
+This example implements a fully playable command-line Tic Tac Toe game. It is a practical showcase of everyday Yoyo idioms: enums for game state, a fixed-size array for the board, struct methods for behaviour, and optional types for fallible results.
+
+**Features demonstrated:**
+- `enum` declaration and variant comparison
+- Static arrays `[T; N]`
+- Struct fields and methods
+- Free functions and UFCS (uniform function call syntax)
+- String interpolation with `${}`
+- Optional return types `T?`
+- `if |winner| (expr)` optional extraction
+- `while` loop with mutable state
+- `break` to exit a loop
+
+## Complete source
+
+```yoyo tic_tac_toe.yoyo
+Player: enum = { X, O, None }
+player_text: fn (p: &[Player; 9], alt: i32) -> str = {
+    if (*(*p)[alt] == Player::X) 
+        return "X";
+    else if (*(*p)[alt] == Player::O)
+        return "O";
+    return "${alt}";
+}
+cycle: fn (p: Player) -> Player = {
+    if (p == Player::X) 
+        return Player::O;
+    else if (p == Player::O)
+        return Player::X;
+    return p;
+}
+Game: struct = {
+    data: [Player; 9],
+    player: Player,
+    render: fn (&this) = {
+        intermediate := "───┼───┼───";
+        row1 := " ${player_text(&this.data, 0)} │ ${player_text(&this.data, 1)} │ ${player_text(&this.data, 2)} ";
+        row2 := " ${player_text(&this.data, 3)} │ ${player_text(&this.data, 4)} │ ${player_text(&this.data, 5)} ";
+        row3 := " ${player_text(&this.data, 6)} │ ${player_text(&this.data, 7)} │ ${player_text(&this.data, 8)} ";
+        row1.test::print();
+        intermediate.test::print();
+        row2.test::print();
+        intermediate.test::print();
+        row3.test::print();
+    }
+    new: fn -> Game = {
+        return Game{ 
+            .data = [
+                Player::None, Player::None, Player::None,
+                Player::None, Player::None, Player::None,
+                Player::None, Player::None, Player::None
+            ],
+            .player = Player::X
+        };
+    }
+    play: fn (&mut this) = {
+        "${this.player}'s turn: ".test::print();
+        idx: mut u32 = 10;
+        while (idx > 9 && *this.data[idx] != Player::None) {
+            idx = test::read_uint();
+        }
+        *this.data[idx] = this.player;
+        this.player = this.player.cycle();
+    }
+    check_winner: fn (&this) -> Player? = {
+        //horizontal winner
+        if (*this.data[0] == *this.data[1] && *this.data[1] == *this.data[2])
+            return *this.data[0];
+        if (*this.data[3] == *this.data[4] && *this.data[4] == *this.data[5])
+            return *this.data[3];
+        if (*this.data[6] == *this.data[7] && *this.data[7] == *this.data[8])
+            return *this.data[6];
+
+        //vertical winner
+        if (*this.data[0] == *this.data[3] && *this.data[3] == *this.data[6])
+            return *this.data[0];
+        if (*this.data[1] == *this.data[4] && *this.data[4] == *this.data[7])
+            return *this.data[1];
+        if (*this.data[2] == *this.data[5] && *this.data[5] == *this.data[8])
+            return *this.data[2];
+        
+        //diagonal winner
+        if (*this.data[0] == *this.data[4] && *this.data[4] == *this.data[5])
+            return *this.data[0];
+        if (*this.data[2] == *this.data[4] && *this.data[4] == *this.data[6])
+            return *this.data[2];
+        return null;
+    }
+}
+
+main: fn = {
+    game: mut = Game::new();
+    game.render();
+    while (true) {
+        game.play();
+        game.render();
+        if |winner| (game.check_winner()) {
+            if (winner != Player::None) {
+                "${winner} won".test::print();
+                break;
+            }
+        }
+    }
+}
+```
+
+## Walk-through
+
+<Steps>
+  <Step title="Player enum">
+
+```yoyo
+Player: enum = { X, O, None }
+```
+
+- `enum` declares a discriminated type with named variants. Variants are accessed via `Player::X`, `Player::O`, and `Player::None`.
+- `None` is used as the initial state for every cell — it is not a keyword, just a user-defined variant name.
+- Enum values are compared with `==` like any other value.
+
+{/* */}
+  </Step>
+  <Step title="player_text helper">
+
+```yoyo
+player_text: fn (p: &[Player; 9], alt: i32) -> str = {
+    if (*(*p)[alt] == Player::X) 
+        return "X";
+    else if (*(*p)[alt] == Player::O)
+        return "O";
+    return "${alt}";
+}
+```
+
+- `p: &[Player; 9]` — a reference to a fixed-size array of 9 `Player` values. The `[T; N]` syntax denotes a static (stack-allocated) array.
+- `*p` dereferences the reference to get the array itself; `(*p)[alt]` indexes into it. The outer `*` dereferences the subscript result to read the `Player` value.
+- If the cell belongs to neither player, it falls back to `"${alt}"` — string interpolation of the numeric index — so empty cells display their board position.
+
+{/* */}
+  </Step>
+  <Step title="cycle function">
+
+```yoyo
+cycle: fn (p: Player) -> Player = {
+    if (p == Player::X) 
+        return Player::O;
+    else if (p == Player::O)
+        return Player::X;
+    return p;
+}
+```
+
+- A pure function that alternates between `X` and `O`. Passing `Player::None` returns `Player::None` unchanged.
+- Because it takes `p` by value (no `&`), it operates on a copy. Enums are cheap to copy.
+- Called later via UFCS: `this.player.cycle()` is equivalent to `cycle(this.player)`.
+
+{/* */}
+  </Step>
+  <Step title="Game struct and fields">
+
+```yoyo
+Game: struct = {
+    data: [Player; 9],
+    player: Player,
+    // methods ...
+}
+```
+
+- `data: [Player; 9]` — a static array of exactly 9 `Player` elements stored inline in the struct. No heap allocation is needed for the board.
+- `player: Player` — tracks whose turn it is.
+
+{/* */}
+  </Step>
+  <Step title="Game::render method">
+
+```yoyo
+render: fn (&this) = {
+    intermediate := "───┼───┼───";
+    row1 := " ${player_text(&this.data, 0)} │ ${player_text(&this.data, 1)} │ ${player_text(&this.data, 2)} ";
+    row2 := " ${player_text(&this.data, 3)} │ ${player_text(&this.data, 4)} │ ${player_text(&this.data, 5)} ";
+    row3 := " ${player_text(&this.data, 6)} │ ${player_text(&this.data, 7)} │ ${player_text(&this.data, 8)} ";
+    row1.test::print();
+    intermediate.test::print();
+    row2.test::print();
+    intermediate.test::print();
+    row3.test::print();
+}
+```
+
+- `&this` — a shared (read-only) reference to the struct. The method does not mutate the game state.
+- `:=` is type-inferred local variable declaration. All three row strings are of type `str`.
+- `${player_text(&this.data, 0)}` — calls the free function `player_text` as a value inside an interpolated string. The `${}` syntax supports arbitrary expressions.
+- `row1.test::print()` — calls the `print` function from the `test` module on the string via UFCS.
+
+{/* */}
+  </Step>
+  <Step title="Game::new constructor">
+
+```yoyo
+new: fn -> Game = {
+    return Game{ 
+        .data = [
+            Player::None, Player::None, Player::None,
+            Player::None, Player::None, Player::None,
+            Player::None, Player::None, Player::None
+        ],
+        .player = Player::X
+    };
+}
+```
+
+- `fn -> Game` — a static (no `this` parameter) constructor returning a `Game` value.
+- The array literal `[ Player::None, ... ]` with 9 elements is assigned directly to the `data` field. The compiler checks the size matches `[Player; 9]`.
+- Field initialisation uses `.fieldname = value` named syntax inside a struct literal.
+- `Player::X` goes first.
+
+{/* */}
+  </Step>
+  <Step title="Game::play method">
+
+```yoyo
+play: fn (&mut this) = {
+    "${this.player}'s turn: ".test::print();
+    idx: mut u32 = 10;
+    while (idx > 9 && *this.data[idx] != Player::None) {
+        idx = test::read_uint();
+    }
+    *this.data[idx] = this.player;
+    this.player = this.player.cycle();
+}
+```
+
+- `&mut this` — a mutable reference, required because the method modifies `data` and `player`.
+- `idx: mut u32 = 10` — initialise `idx` to an invalid value (`10` is out of range for `0..=8`) to force the `while` condition true on the first iteration.
+- The loop keeps reading from input until the player enters a valid, unoccupied index.
+- `*this.data[idx] = this.player` — uses the subscript operator to index into the array, then dereferences the result to write the current player's mark.
+- `this.player.cycle()` — advances the turn via UFCS.
+
+{/* */}
+  </Step>
+  <Step title="Game::check_winner method">
+
+```yoyo
+check_winner: fn (&this) -> Player? = {
+    //horizontal winner
+    if (*this.data[0] == *this.data[1] && *this.data[1] == *this.data[2])
+        return *this.data[0];
+    // ... (vertical and diagonal checks)
+    return null;
+}
+```
+
+- `-> Player?` — the `?` suffix makes the return type optional. The method returns a `Player` value if there is a winner, or `null` if the game is still ongoing.
+- Each check reads three cells from `data` by indexing and dereferencing, then compares all three with `==`. If they match, that player wins.
+- The final `return null` covers the no-winner case.
+
+<Note>
+The current implementation returns the matching player value even if all three cells are `Player::None`, so the caller must additionally check `winner != Player::None`. This is handled in `main`.
+</Note>
+
+  </Step>
+  <Step title="main game loop">
+
+```yoyo
+main: fn = {
+    game: mut = Game::new();
+    game.render();
+    while (true) {
+        game.play();
+        game.render();
+        if |winner| (game.check_winner()) {
+            if (winner != Player::None) {
+                "${winner} won".test::print();
+                break;
+            }
+        }
+    }
+}
+```
+
+- `game: mut = Game::new()` — creates a mutable game instance with type inferred from the constructor.
+- The `while (true)` loop runs until a winner is found.
+- `if |winner| (game.check_winner())` — extracts the optional `Player?` return value. If the result is non-null, `winner` is bound to the `Player` value and the inner block executes.
+- `if (winner != Player::None)` — guards against the case where three `None` cells matched (see note above).
+- `break` exits the `while` loop immediately.
+
+{/* */}
+  </Step>
+</Steps>
+
+## Key concepts summary
+
+<AccordionGroup>
+  <Accordion title="Enum declaration and usage">
+
+```yoyo
+Player: enum = { X, O, None }
+
+// Variant access
+if (p == Player::X) ...
+*this.data[idx] = this.player;
+```
+
+Enums are value types. Compare variants with `==`; access them with `TypeName::Variant`.
+  </Accordion>
+  <Accordion title="Static arrays [T; N]">
+
+```yoyo
+data: [Player; 9]
+
+// Literal
+.data = [ Player::None, Player::None, ... ]
+
+// Indexed access (returns a reference, dereference to read/write)
+*this.data[idx]
+```
+
+Static arrays live inline in the struct (or on the stack). Size is fixed at compile time and encoded in the type.
+  </Accordion>
+  <Accordion title="Optional return types T?">
+
+```yoyo
+check_winner: fn (&this) -> Player? = {
+    // ...
+    return *this.data[0]; // Some(Player)
+    return null;          // None
+}
+```
+
+Append `?` to any type to make it optional. Return `null` for the absent case.
+  </Accordion>
+  <Accordion title="String interpolation ${} ">
+
+```yoyo
+" ${player_text(&this.data, 0)} │ ${player_text(&this.data, 1)} │ ... "
+"${winner} won"
+```
+
+Any expression can appear inside `${}` within a string literal. The result is automatically converted to a string.
+  </Accordion>
+  <Accordion title="Struct methods and UFCS">
+
+Methods are declared inside the struct body with a `this` parameter. Call them with dot notation:
+
+```yoyo
+game.render();         // calls render(&game)
+game.play();           // calls play(&mut game)
+this.player.cycle()    // UFCS: cycle(this.player)
+```
+
+Free functions can also be called as methods when the first parameter type matches (uniform function call syntax).
+  </Accordion>
+</AccordionGroup>

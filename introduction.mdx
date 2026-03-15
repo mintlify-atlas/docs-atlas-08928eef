@@ -1,0 +1,182 @@
+---
+title: "Introduction"
+description: "What Yoyo is, how it works, and why it was built."
+---
+
+Yoyo is a statically typed, embeddable scripting language written in C++20. It is designed to run inside your C++ application, giving you a safe and expressive scripting layer with JIT compilation, a borrow checker, and direct access to your host-application APIs.
+
+<Warning>
+  Yoyo is an active research language. The implementation is not yet production-ready and the API surface is still evolving.
+</Warning>
+
+## Design goals
+
+<CardGroup cols={2}>
+  <Card title="Memory safety" icon="shield">
+    A borrow checker with dataflow analysis prevents use-after-free, double-free, and aliasing bugs at compile time. GC-managed references (`^T`) are also available.
+  </Card>
+  <Card title="Static typing" icon="check">
+    All types are resolved at compile time. Generics, type inference, interfaces, and operator overloading are first-class features.
+  </Card>
+  <Card title="JIT compilation" icon="bolt">
+    Scripts compile to native code via LLVM, or to bytecode executed on the custom YVM virtual machine — no interpreter overhead.
+  </Card>
+  <Card title="C++ interop" icon="link">
+    Register C++ functions, enums, and classes with a single `addFunction()` call. Yoyo scripts call into your host application as if the functions were native.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+The Yoyo compilation pipeline is fully contained in the `libyoyo` library. Source text passes through each stage before reaching a backend:
+
+```
+Source text
+    │
+    ▼
+ Scanner  (tokenize)
+    │
+    ▼
+ Parser   (build AST)
+    │
+    ▼
+ Type checker  (resolve types, generics, overloads)
+    │
+    ▼
+ Borrow checker  (ownership + lifetime analysis)
+    │
+    ▼
+ IR generator  (lower AST to backend IR)
+    │
+    ├──► LLVM backend  → LLVM IR → native machine code
+    │
+    └──► YVM backend   → YVM bytecode → libffi dispatch
+```
+
+The core pipeline stages (scanner through IR generator) are shared between both backends. Only the final lowering step differs.
+
+## Two backends
+
+<Tabs>
+  <Tab title="YVM (default)">
+    The **Yoyo Virtual Machine** compiles to a custom bytecode format and dispatches native calls through libffi. It is the recommended backend for embedding:
+
+    - Simpler build configuration (no LLVM dependency)
+    - Fast startup time
+    - Fiber-based async execution via the built-in runtime
+
+    The YVM subproject is bundled under `subprojects/yoyo-vm`.
+
+    ```cpp
+    #include <yvm/yvm_engine.h>
+    #include <yvm/app_module.h>
+
+    Yoyo::YVMEngine engine;
+    auto mod = engine.addAppModule("app");
+    mod->addFunction("(x: &str) -> i32", my_func, "print");
+    engine.addModule("main", source_code);
+    engine.compile();
+    engine.execute();
+    ```
+  </Tab>
+  <Tab title="LLVM">
+    The **LLVM backend** lowers Yoyo IR to LLVM IR and compiles to native machine code, providing maximum runtime performance for compute-intensive scripts.
+
+    - Optimal performance for long-running scripts
+    - Requires LLVM as a build dependency
+    - Can be built statically (`-Dllvm_static=true`) or dynamically
+
+    ```cpp
+    #include <llvm/llvm_engine.h>
+    #include <llvm/app_module.h>
+
+    Yoyo::LLVMEngine engine;
+    auto mod = engine.addAppModule("app");
+    engine.addModule("main", source_code);
+    engine.compile();
+    engine.execute();
+    ```
+  </Tab>
+</Tabs>
+
+## Declaration syntax
+
+Yoyo syntax is inspired by [cppfront](https://github.com/hsutter/cppfront). All declarations share a single unified form:
+
+```
+name: kind = value;
+```
+
+This applies uniformly to variables, functions, types, and constants:
+
+```
+// Variable with explicit type
+x: i32 = 42;
+
+// Type-inferred mutable variable
+y: mut = 10;
+
+// Function
+add: fn(a: i32, b: i32) -> i32 = return a + b;
+
+// Struct
+Point: struct = {
+    x: f32,
+    y: f32
+}
+
+// Generic struct
+Wrapper: struct::<T> = {
+    data: T
+}
+```
+
+Function bodies with a single statement can omit the braces:
+
+```
+square: fn(n: i32) -> i32 = return n * n;
+```
+
+## Memory model
+
+Yoyo uses ownership and borrowing semantics similar to Rust, enforced by a borrow checker that runs on a control-flow graph (CFG) built from the AST:
+
+- Values have a single owner. Assignment transfers ownership.
+- Immutable borrows (`&T`) can coexist freely.
+- Mutable borrows (`&mut T`) are exclusive — no other borrow may exist at the same time.
+- Garbage-collected references (`^T`) bypass the borrow checker and are heap-allocated via the Boehm GC.
+
+<Note>
+  The memory model documentation is still being written. See the [language guide](/language/memory-model) for current coverage.
+</Note>
+
+## Project status
+
+Yoyo is a research implementation. The following subsystems are functional:
+
+- Scanner, parser, and AST
+- Type checker with generics and interface constraints
+- Borrow checker
+- IR generation for both backends
+- YVM execution engine
+- LLVM execution engine
+- C++ interop via `AppModule`
+- Fiber-based async runtime
+- Operator overloading, unions, enums, string interpolation
+
+The following are planned or partially implemented:
+
+- Closures / lambdas (in progress)
+- Standard library
+- Language server
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Embed Yoyo in a C++ project and run your first script in minutes.
+  </Card>
+  <Card title="Language guide" icon="book" href="/language/syntax">
+    Learn Yoyo syntax, types, structs, generics, and the memory model.
+  </Card>
+</CardGroup>

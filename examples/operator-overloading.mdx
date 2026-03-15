@@ -1,0 +1,215 @@
+---
+title: "Operator Overloading"
+description: "Define custom subscript operators on structs in Yoyo. Covers the operator declaration syntax, the three receiver forms, and calling overloaded operators."
+---
+
+Yoyo lets you define custom behaviour for built-in operators on your own types. This example shows how to overload the subscript (`[]`) operator on a `Vector2` struct, producing both a read and a write form.
+
+**Features demonstrated:**
+- `operator` declaration syntax
+- The three receiver forms: immutable reference, mutable reference, and mutable value
+- Subscript operator `[]` overloading
+- Using overloaded operators in a function
+- Compound-assignment operators generated from binary operators
+
+## Complete source
+
+```yoyo source.yoyo
+func_2: fn = {
+	a: mut = Vector2{.x = 90, .y = 20};
+	test::print(&"${(a)[0]}, ${(a)[1]}");
+	b: mut u32 = 10;
+	test::print(&"${b}");
+	b[&a];
+	test::print(&"${b}");
+}
+
+Vector2: struct = {
+	x: u32, y: u32
+}
+operator: mut [](x: &mut u32, y: &Vector2) -> void = *x = y.x;
+operator: [](x: &Vector2, y: u32) -> u32 = {
+	if (y == 0) return x.x; else return x.y;
+}
+operator: mut [](x: &mut Vector2, y: u32) -> u32 = {
+	return 100;
+}
+```
+
+## Walk-through
+
+<Steps>
+  <Step title="Vector2 struct">
+
+```yoyo
+Vector2: struct = {
+    x: u32, y: u32
+}
+```
+
+A simple two-component vector. Both components are `u32`. The struct has no methods; all behaviour is added through operator declarations.
+
+  </Step>
+  <Step title="operator declaration syntax">
+
+Operator declarations use the following general form:
+
+```yoyo
+operator: [qualifier] op(lhs: LhsType, rhs: RhsType) -> ReturnType = body;
+```
+
+| Part | Description |
+|---|---|
+| `operator` | keyword introducing the declaration |
+| `: mut` | optional qualifier — present when the left-hand side is mutable |
+| `[]` | the operator symbol being overloaded |
+| `lhs` | the left-hand operand (the object being subscripted) |
+| `rhs` | the right-hand operand (the index or key) |
+| `-> ReturnType` | return type of the operation |
+| `= body` | implementation, either an expression or a block |
+
+The three overloads in this example cover three different call patterns:
+
+```yoyo
+// 1. Read subscript on a Vector2: (a)[index]
+operator: [](x: &Vector2, y: u32) -> u32 = {
+    if (y == 0) return x.x; else return x.y;
+}
+
+// 2. Write subscript on a Vector2: *(&mut vector)[index] = value
+operator: mut [](x: &mut Vector2, y: u32) -> u32 = {
+    return 100;
+}
+
+// 3. Write subscript with Vector2 as index: b[&a] where b is &mut u32
+operator: mut [](x: &mut u32, y: &Vector2) -> void = *x = y.x;
+```
+
+  </Step>
+  <Step title="Immutable subscript: reading components">
+
+```yoyo
+operator: [](x: &Vector2, y: u32) -> u32 = {
+    if (y == 0) return x.x; else return x.y;
+}
+```
+
+- No `mut` qualifier — the left-hand side is an immutable reference `&Vector2`.
+- Index `0` maps to the `x` component; any other index maps to `y`.
+- Used in `func_2` as `(a)[0]` and `(a)[1]`, which reads `90` and `20` respectively.
+
+{/* */}
+  </Step>
+  <Step title="Mutable subscript: Vector2 as receiver">
+
+```yoyo
+operator: mut [](x: &mut Vector2, y: u32) -> u32 = {
+    return 100;
+}
+```
+
+- `mut` qualifier — the left-hand side is a mutable reference `&mut Vector2`.
+- This form is called when you subscript a mutable `Vector2` in a context that requires a writable reference (for example, to assign through it).
+- The body returns `100` as a placeholder; a real implementation would return a mutable reference to the appropriate component.
+
+{/* */}
+  </Step>
+  <Step title="Mutable subscript: u32 as receiver, Vector2 as index">
+
+```yoyo
+operator: mut [](x: &mut u32, y: &Vector2) -> void = *x = y.x;
+```
+
+- This overload is the most unusual: the *left-hand side* is a `u32` and the *index* is a `Vector2`.
+- Called as `b[&a]` — subscript `b` (a `u32`) using `a` (a `Vector2`) as the index.
+- The body assigns `y.x` to `*x`, so after `b[&a]`, `b` holds the value of `a.x` (which is `90`).
+- The return type is `void`; this is a pure side-effecting operation.
+
+{/* */}
+  </Step>
+  <Step title="func_2: exercising all three overloads">
+
+```yoyo
+func_2: fn = {
+    a: mut = Vector2{.x = 90, .y = 20};
+    test::print(&"${(a)[0]}, ${(a)[1]}");
+    b: mut u32 = 10;
+    test::print(&"${b}");
+    b[&a];
+    test::print(&"${b}");
+}
+```
+
+Step by step:
+
+1. `a: mut = Vector2{.x = 90, .y = 20}` — creates a mutable `Vector2` on the stack.
+2. `(a)[0]` and `(a)[1]` — invoke the immutable subscript operator with `u32` indices. Prints `90, 20`.
+3. `b: mut u32 = 10` — declares a mutable `u32` variable.
+4. `test::print(&"${b}")` — prints `10`.
+5. `b[&a]` — invokes the mutable subscript operator where `b` is the receiver and `&a` is the index. Sets `b = a.x = 90`.
+6. Final print outputs `90`.
+
+  </Step>
+</Steps>
+
+## Operator reference
+
+<AccordionGroup>
+  <Accordion title="Available operators">
+
+Yoyo supports overloading the following operators:
+
+```
+operator +. (This, Other)
+operator -. (This, Other)
+operator *. (This, Other)
+operator /. (This, Other)
+operator %. (This, Other)
+operator &. (This, Other)
+operator |. (This, Other)
+operator ^. (This, Other)
+operator &[]. (&This, Other)
+operator &mut []. (&mut This, Other)
+operator -.(This)
+operator !.(This)
+operator <<.(This, Other)
+operator >>.(This, Other)
+```
+
+Comparison operators use one of:
+
+```
+operator <=> (&This, Other) -> StrongOrdering
+operator <=> (&This, Other) -> PartialOrdering
+operator == (&This, Other) -> bool
+```
+  </Accordion>
+  <Accordion title="Compound-assignment operators">
+
+Yoyo automatically generates compound-assignment forms (`+=`, `-=`, `*=`, `/=`, `%=`, `>>=`, `<<=`, `&=`, `^=`, `|=`) from the corresponding binary operators. For example:
+
+```yoyo
+// If you define operator +. (This, Other), then:
+val += other
+// expands to:
+val = val + other  // val is moved into the addition
+```
+
+You do not need to define compound-assignment operators separately.
+  </Accordion>
+  <Accordion title="Receiver forms">
+
+The qualifier on `operator` determines how the left-hand side is passed:
+
+| Declaration | LHS type | Use case |
+|---|---|---|
+| `operator: [](...)` | `&T` (shared reference) | read-only access |
+| `operator: mut [](...)` | `&mut T` (mutable reference) | mutation or write-through |
+
+Choose the immutable form when the operator only needs to read from the receiver, and the mutable form when it needs to modify it or return a mutable reference.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Operator overloading is most useful for numeric or container types where mathematical notation makes the code significantly clearer than named method calls. Avoid overloading operators in ways that deviate from their conventional meaning.
+</Tip>

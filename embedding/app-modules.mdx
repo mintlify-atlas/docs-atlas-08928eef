@@ -1,0 +1,211 @@
+---
+title: "App modules"
+description: "Expose C++ functions, enums, and classes to Yoyo scripts using AppModule."
+---
+
+An **app module** is a named Yoyo module whose contents are provided by C++ code rather than Yoyo source text. Scripts call into it with the usual `module_name::function_name(args)` syntax. The app module layer handles type validation, calling-convention bridging, and lifetime safety between the two languages.
+
+## Creating an app module
+
+Call `addAppModule()` on your engine before calling `compile()`:
+
+```cpp
+#include <yvm/yvm_engine.h>
+#include <yvm/app_module.h>
+
+Yoyo::YVMEngine engine;
+Yoyo::YVMAppModule* mod = engine.addAppModule("test");
+```
+
+The string `"test"` becomes the module name visible to scripts. You can have multiple app modules in the same engine with different names.
+
+<Note>
+  For the LLVM backend, use `LLVMEngine::addAppModule()` which returns an `LLVMAppModule*`. The registration API — `addFunction()`, `addEnum()`, `addClass()` — is identical between the two app module types.
+</Note>
+
+## Registering functions
+
+Use `addFunction()` to expose a C++ function. The template overload accepts any plain function pointer and verifies the signature at compile time:
+
+```cpp
+template<typename R, typename... Args>
+Result addFunction(std::string sig_str, R(*func)(Args...), std::string name);
+```
+
+- `sig_str` — a Yoyo function signature string (e.g. `"(x: &str) -> i32"`)
+- `func` — a plain C++ function pointer (not a lambda, not a `std::function`)
+- `name` — the identifier Yoyo scripts use to call the function
+
+### Signature string format
+
+The signature string uses Yoyo syntax. Parameters are comma-separated inside parentheses; the return type follows `->`. Parameter names are optional for app module functions.
+
+```
+(x: &str) -> i32
+(x: bool, y: &str) -> void
+(x: i32) -> u64
+() -> str
+(x: u64) -> void
+-> [i64; 10] \ str
+```
+
+- `&str` — borrowed string reference (passed as `void*` on the C++ side; read with `Engine::viewString()`)
+- `str` — owned string (returned by writing into an sret pointer; see [Returning strings](#returning-strings))
+- `\ T` — result type (success or error)
+- Primitive types: `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bool`
+
+### Return value
+
+`addFunction()` returns a `Yoyo::Result` enum. Always check it:
+
+```cpp
+auto result = mod->addFunction("(x: &str) -> i32", my_print, "print");
+if (result != Yoyo::Result::Success) {
+    // handle registration failure
+}
+```
+
+| `Result` value | Meaning |
+|---|---|
+| `Success` | Registered successfully. |
+| `NullParameter` | The function pointer was null. |
+| `InvalidSignature` | The signature string failed to parse. |
+| `ParameterCountMismatch` | Signature parameter count does not match the C++ function. |
+| `ReturnTypeMismatch` | Signature return type does not match the C++ return type. |
+| `ParameterTypeMismatch` | A parameter type in the signature does not match. |
+| `DuplicateEnumValue` | Used by `addEnum()` — two enum values share the same integer. |
+
+### Parameter count and `should_sret`
+
+For types that are passed by hidden pointer (structs, strings, result types), the compiler adds an implicit sret parameter. The template checks that `sizeof...(Args)` equals `sig.parameters.size() + sig.returnType.should_sret()`. When `should_sret()` is true, the C++ return type must be `void` and the first argument receives the output pointer.
+
+### Examples from the test suite
+
+The following registrations come directly from `ir_gen_test.cpp`:
+
+```cpp
+// Print a string and return a status code
+int32_t my_print(void* arg) {
+    std::string_view sv = Yoyo::Engine::viewString(arg);
+    std::cout << sv << std::endl;
+    return -76;
+}
+mod->addFunction("(x: &str) -> i32", my_print, "print");
+
+// Assert with a message
+void my_assert(bool cond, void* msg) { /* ... */ }
+mod->addFunction("(x: bool, y: &str) -> void", my_assert, "assert");
+
+// Compare two strings
+void test_str_cmp(void* str1, void* str2) {
+    auto sv1 = Yoyo::Engine::viewString(str1);
+    auto sv2 = Yoyo::Engine::viewString(str2);
+    // ...
+}
+mod->addFunction("(x: &str, y: &str) -> void", test_str_cmp, "str_cmp");
+
+// Return an integer constant
+mod->addFunction("() -> i32",
+    static_cast<int32_t(*)()>([]() -> int32_t { return -50; }),
+    "get_int");
+
+// Print a 64-bit integer
+void print_int(uint64_t arg) { std::cout << arg << std::endl; }
+mod->addFunction("(x: u64) -> void", print_int, "print_int");
+
+// Widen an i32 to u64
+mod->addFunction("(x: i32) -> u64",
+    static_cast<uint64_t(*)(int32_t)>([](int32_t x) -> uint64_t { return x; }),
+    "i32_to_u64");
+
+// Accept a static array reference
+mod->addFunction("(x: &[i32; 10]) -> void",
+    static_cast<void(*)(void*)>([](void* arr) { /* inspect array */ }),
+    "check_array");
+
+// Return a result type (sret)
+mod->addFunction("-> [i64; 10] \\ str",
+    static_cast<void(*)(void*)>([](void* out) {}),
+    "return_result");
+```
+
+### Returning strings
+
+To return an owned `str` from C++, the C++ function must accept a `void*` output pointer and write the string structure into it. The Yoyo string layout is:
+
+```cpp
+struct YoyoString {
+    char*    text;      // heap-allocated UTF-8 data
+    uint64_t size;      // byte length
+    uint64_t capacity;  // allocated capacity
+};
+
+void get_string(void* out) {
+    auto* s = reinterpret_cast<YoyoString*>(out);
+    s->text     = static_cast<char*>(malloc(15));
+    s->size     = 15;
+    s->capacity = 15;
+    strcpy(s->text, "Hello from c++");
+}
+```
+
+Register it with a `-> str` signature and a `void` C++ return:
+
+```cpp
+mod->addFunction("() -> str", get_string, "get_string");
+```
+
+## Registering enums
+
+Expose a C++ `int32_t`-backed enum to scripts with `addEnum()`:
+
+```cpp
+Result addEnum(std::string enum_name,
+               std::unordered_map<std::string, int32_t> values);
+```
+
+Example:
+
+```cpp
+mod->addEnum("Color", {
+    {"Red",   0},
+    {"Green", 1},
+    {"Blue",  2},
+});
+```
+
+Scripts access enum values as `test::Color::Red`. If two entries map to the same integer, `addEnum()` returns `Result::DuplicateEnumValue`.
+
+## Registering classes
+
+Expose a C++ struct layout to scripts with `addClass()`:
+
+```cpp
+Result addClass(std::string class_name,
+                std::vector<ClassVariable> variables,
+                Ownership ownership,
+                std::string block_hash);
+```
+
+- `class_name` — name visible to scripts
+- `variables` — ordered list of fields (name + Yoyo type)
+- `ownership` — memory ownership semantics for the class
+- `block_hash` — an internal identifier for the class's scope
+
+<Warning>
+  `addClass()` is an advanced API. Incorrect field layout or ownership semantics can cause memory safety violations. Ensure the C++ struct layout matches the field list exactly.
+</Warning>
+
+## Calling app module functions from scripts
+
+Scripts call into an app module using `module_name::function_name(args)`:
+
+```yoyo
+main: fn = {
+    test::print(&"Hello from Yoyo");
+    test::assert(1 == 1, &"1 equals 1");
+    result := test::get_int();
+}
+```
+
+The `&` operator borrows a value, producing a `&str` from a string literal. This matches the `&str` parameter type registered in `addFunction()`.
